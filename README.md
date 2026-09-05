@@ -14,6 +14,8 @@ For AMD, nvcuda.dll and nvapi64.dll are already included. they aren't the offici
 
 nvngx.dll is included too, this isn't the official dll, it's a custom re-implmentation, the source is included in the project under the "ngx_runtime" directory
 
+AMD users will also have to install the [official HIP SDK for Windows](https://www.amd.com/en/developer/resources/rocm-hub/hip-sdk.html)
+
 
 The "Network" one is the nvngx_dlssnr.dll which is the library that actually contains the DLSS5 code. This one is the official Nvidia library, and it's not included in this project. you have to get it from a game which uses it (for example NBA 2K27), or get it from one of the countless community projects that are using it, like the RenoDX plugin for Reshade.
 
