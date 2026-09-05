@@ -28,6 +28,8 @@ I also made a "nvidia mode", which tries to run the dlss using the official driv
 
 NOTE: This feature isn't tested yet, since i don't have an nvidia gpu to test with at the moment.
 
+# Known Issues
+The program can sometimes fail to generate the picture, and you'll get a blank picture in output. if it does that, try loading a different picture or re-open the program. i'm currently trying to figure out what causes this.
 
 # Frequently Asked Questions (FAQ)
 
