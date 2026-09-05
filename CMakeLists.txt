@@ -17,11 +17,6 @@ set(CMAKE_AUTOMOC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
-# The DLSS half is the addon's, used unchanged. It is the layer that has been
-# made to work; a second implementation would only be a second thing to get
-# wrong.
-set(ADDON ${CMAKE_CURRENT_SOURCE_DIR}/../addon)
-
 add_executable(dlss5-image-enhancer WIN32
     gui/main.cpp
     gui/main_window.cpp
@@ -31,11 +26,11 @@ add_executable(dlss5-image-enhancer WIN32
     core/image_processor.h
     core/precompile.cpp
     core/precompile.h
-    ${ADDON}/dlss_cuda.cpp
-    ${ADDON}/frame_blit.cpp
+    dlss_layer/dlss_cuda.cpp
+    dlss_layer/frame_blit.cpp
 )
 
-target_include_directories(dlss5-image-enhancer PRIVATE ${ADDON})
+target_include_directories(dlss5-image-enhancer PRIVATE dlss_layer)
 target_link_libraries(dlss5-image-enhancer PRIVATE Qt6::Widgets d3d12 dxgi d3dcompiler)
 
 # A console alongside the window: the DLSS layer and the network both report
@@ -46,13 +41,6 @@ target_compile_definitions(dlss5-image-enhancer PRIVATE UNICODE _UNICODE NOMINMA
 # Our own NGX runtime -- nvngx.dll, the stand-in that lets the snippet believe
 # it is being driven by NVIDIA's own NGX loader. See the comment at the top of
 # ngx_runtime/ngx_runtime.cpp for what it does and why it exists.
-#
-# The source under ngx_runtime/ is a deliberate copy of addon/ngx_runtime.cpp,
-# not a reference to it: this project and the ReShade addon are kept as two
-# separate projects, each with its own complete source and its own build, and
-# neither CMakeLists reaches into the other's tree. ${ADDON} above is the one
-# exception, for the DLSS layer itself, which predates this and is a choice
-# already made -- this target does not extend that pattern to the runtime.
 add_library(nvngx SHARED
     ngx_runtime/ngx_runtime.cpp
     ngx_runtime/ngx_cuda.h

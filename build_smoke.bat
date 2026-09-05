@@ -8,9 +8,9 @@ set ROOT=%~dp0
 set OUT=%ROOT%..\bin
 if not exist "%OUT%" mkdir "%OUT%"
 cl /nologo /std:c++17 /EHsc /O2 /W3 /D_CRT_SECURE_NO_WARNINGS ^
-   /I "%ROOT%..\addon" ^
+   /I "%ROOT%dlss_layer" ^
    "%ROOT%tests\processor_smoke.cpp" "%ROOT%core\image_processor.cpp" ^
-   "%ROOT%..\addon\dlss_cuda.cpp" "%ROOT%..\addon\frame_blit.cpp" ^
+   "%ROOT%dlss_layer\dlss_cuda.cpp" "%ROOT%dlss_layer\frame_blit.cpp" ^
    /Fo:"%OUT%\\" /Fe:"%OUT%\processor_smoke.exe"
 if errorlevel 1 exit /b 1
 del "%OUT%\*.obj" >nul 2>&1
