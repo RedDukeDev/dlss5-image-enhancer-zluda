@@ -321,7 +321,7 @@ QWidget *MainWindow::build_controls() {
 namespace {
 // Defined further down, next to the search it does.
 void fill_in_defaults(QLineEdit *snippet, QLineEdit *driver, QLineEdit *runtime,
-                      QLineEdit *nvapi);
+                      QLineEdit *nvapi, bool nvidia);
 } // namespace
 
 QWidget *MainWindow::build_paths() {
@@ -385,11 +385,8 @@ void MainWindow::set_nvidia_mode(bool nvidia) {
         driver_path_->clear();
         nvapi_path_->clear();
     }
-    // Nothing was typed over -- fill_in_defaults only ever touches an empty
-    // field -- so on AMD this just brings back what switching away hid, and
-    // on NVIDIA it fills the runtime in from beside the executable without
-    // touching the driver/NVAPI fields just cleared above.
-    fill_in_defaults(snippet_path_, driver_path_, runtime_path_, nvapi_path_);
+    
+    fill_in_defaults(snippet_path_, driver_path_, runtime_path_, nvapi_path_, nvidia);
 }
 
 namespace {
@@ -405,7 +402,7 @@ namespace {
 // system directory, and the network itself ships in the driver store, where the
 // folder name changes with every release and so has to be searched for.
 void fill_in_defaults(QLineEdit *snippet, QLineEdit *driver, QLineEdit *runtime,
-                      QLineEdit *nvapi) {
+                      QLineEdit *nvapi, bool nvidia) {
     const QDir beside(QCoreApplication::applicationDirPath());
     const auto local = [&beside](const char *name) -> QString {
         const QString path = beside.filePath(QLatin1String(name));
@@ -419,16 +416,23 @@ void fill_in_defaults(QLineEdit *snippet, QLineEdit *driver, QLineEdit *runtime,
     // The runtime is ours or nothing; never the driver's.
     if (runtime->text().isEmpty()) runtime->setText(local("nvngx.dll"));
 
-    if (driver->text().isEmpty()) {
-        QString found = local("nvcuda.dll");
-        if (found.isEmpty()) found = system32("nvcuda.dll");
-        driver->setText(found);
-    }
+    // The ZLUDA dll and NVAPI belong to the AMD arrangement only.
+    if (!nvidia) {
+        if (driver->text().isEmpty()) {
+            // Beside the executable, then in a zluda subfolder, then the
+            // system's own: the stand-in may be kept apart from this program's
+            // own files rather than mixed in with them.
+            QString found = local("nvcuda.dll");
+            if (found.isEmpty()) found = local("zluda/nvcuda.dll");
+            driver->setText(found);
+        }
 
-    // Only on a machine without an NVIDIA driver: on one with it, the real NVAPI
-    // describes the hardware truthfully and the stand-in would only lie.
-    if (nvapi->text().isEmpty() && system32("nvapi64.dll").isEmpty())
-        nvapi->setText(local("nvapi64.dll"));
+        if (nvapi->text().isEmpty()) {
+            QString found = local("nvapi64.dll");
+            if (found.isEmpty()) found = local("zluda/nvapi64.dll");
+            nvapi->setText(found);
+        }
+    }
 
     if (snippet->text().isEmpty()) {
         QString found = local("nvngx_dlssnr.dll");

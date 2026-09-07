@@ -31,7 +31,7 @@ REM /MIR mirrors, so a file windeployqt drops on one run (say, before a flag
 REM above was added) does not linger in dist\ after a later run stops
 REM producing it.
 robocopy build dist /MIR /NFL /NDL /NJH /NJS ^
-    /XD CMakeFiles dlss5-image-enhancer_autogen nvngx_autogen .qt ^
+    /XD CMakeFiles dlss5-image-enhancer_autogen nvngx_autogen .qt zluda ^
     /XF CMakeCache.txt build.ninja cmake_install.cmake *.pdb *.lib *.exp .ninja_log .ninja_deps
 REM robocopy's own exit codes are a bitmask where 0-7 all mean success (0 =
 REM nothing needed copying); only 8 and above is a real failure.

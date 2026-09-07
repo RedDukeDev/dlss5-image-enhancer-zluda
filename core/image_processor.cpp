@@ -61,6 +61,16 @@ bool is_real_nvidia_driver(const std::wstring &path) {
     return wcsstr(company, L"NVIDIA") != nullptr;
 }
 
+// A library of the machine's own, named outright rather than left to a search.
+// Empty if it is not installed.
+std::wstring in_system_directory(const wchar_t *name) {
+    wchar_t directory[MAX_PATH];
+    const UINT length = GetSystemDirectoryW(directory, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) return {};
+    std::wstring path = std::wstring(directory) + L"\\" + name;
+    return GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES ? std::wstring() : path;
+}
+
 // A texture copy moves aligned rows, and the rows coming from an image file are
 // not aligned, so everything goes through a staging buffer.
 UINT aligned_pitch(UINT bytes) {
@@ -216,22 +226,25 @@ bool Processor::start(const Paths &paths, std::string &error,
     s->fence_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
 
     // The network loads the CUDA driver itself, by the name nvcuda.dll, whatever
-    // this program was pointed at. Two things follow.
-    //
-    // The file has to actually be called nvcuda.dll. Pointing at ZLUDA under its
-    // build name, zluda_real.dll, satisfies this program and then the network
-    // fails on its own with 0xBAD00002 out of Init -- a code that says nothing.
-    // Its log is the only place the reason appears: "failed to load cuda DLL".
-    //
-    // An empty field is not a wrong name: it means "resolve nvcuda.dll the
-    // normal way", which is what a real NVIDIA machine wants -- the driver
-    // installs into System32, on the standard search path, and does not need
-    // to be found by hand. Only a non-empty field is held to the naming rule.
-    if (!paths.cuda_driver.empty()) {
-        const size_t slash = paths.cuda_driver.find_last_of(L"/" L"\\");
-        const std::wstring name = slash == std::wstring::npos
-                                      ? paths.cuda_driver
-                                      : paths.cuda_driver.substr(slash + 1);
+    // this program was pointed at, so the file has to actually be called that.
+    const bool nvidia_mode = paths.cuda_driver.empty();
+    std::wstring cuda_driver = paths.cuda_driver;
+    std::wstring nvapi = paths.nvapi;
+    if (nvidia_mode) {
+        cuda_driver = in_system_directory(L"nvcuda.dll");
+        if (cuda_driver.empty()) {
+            error = "NVIDIA mode needs NVIDIA's own CUDA driver, and nvcuda.dll is not in the "
+                    "system directory. Install the driver, or switch to AMD (ZLUDA) mode and "
+                    "point the CUDA driver field at ZLUDA's nvcuda.dll.";
+            return false;
+        }
+        nvapi = in_system_directory(L"nvapi64.dll");
+    }
+
+    {
+        const size_t slash = cuda_driver.find_last_of(L"/" L"\\");
+        const std::wstring name =
+            slash == std::wstring::npos ? cuda_driver : cuda_driver.substr(slash + 1);
         if (_wcsicmp(name.c_str(), L"nvcuda.dll") != 0) {
             error = "the CUDA driver has to be a file named nvcuda.dll. The network loads it "
                     "by that name on its own, whatever this program is pointed at, so any "
@@ -243,7 +256,7 @@ bool Processor::start(const Paths &paths, std::string &error,
         // And its directory has to be searchable, both for the network's own
         // load and for a proxy driver that forwards to a library beside it.
         if (slash != std::wstring::npos)
-            SetDllDirectoryW(paths.cuda_driver.substr(0, slash).c_str());
+            SetDllDirectoryW(cuda_driver.substr(0, slash).c_str());
     }
 
     // On anything other than a real NVIDIA driver, the network's code has to be
@@ -261,14 +274,11 @@ bool Processor::start(const Paths &paths, std::string &error,
     // starts, against tens of minutes the one time a module is actually
     // missing -- not worth a per-module check to shave off.
     //
-    // An empty field is checked first and on its own, ahead of asking what
-    // driver it names: NVIDIA mode leaves this field empty on purpose (see
-    // set_nvidia_mode in the GUI), and precompile has no path to hand its
-    // spawned copies in that case regardless of which GPU is underneath --
-    // is_real_nvidia_driver(L"") fails to open anything and, on that empty
-    // failure, reports "not NVIDIA", which used to send this down the ZLUDA
-    // path by mistake on real hardware too.
-    if (!paths.cuda_driver.empty() && !is_real_nvidia_driver(paths.cuda_driver)) {
+    // NVIDIA mode reaches here holding the machine's own driver, so the file
+    // itself answers the question and nothing else has to: NVIDIA's own means
+    // the network's machine code is already there and there is nothing to
+    // translate.
+    if (!is_real_nvidia_driver(cuda_driver)) {
         std::string precompile_error;
         const bool ok = precompile(
             paths.snippet, paths.cuda_driver, 0,
@@ -283,8 +293,9 @@ bool Processor::start(const Paths &paths, std::string &error,
 
     // The network refuses anything below a Blackwell part, and asks NVAPI what
     // this is. The stand-in NVAPI reads this and answers accordingly, so it has
-    // to be set before the driver is loaded.
-    SetEnvironmentVariableW(L"ZLUDA_NVAPI_GPU_ARCH", L"0x1B0");
+    // to be set before the driver is loaded. Not in NVIDIA mode: there the real
+    // NVAPI answers, and it describes the card truthfully.
+    if (!nvidia_mode) SetEnvironmentVariableW(L"ZLUDA_NVAPI_GPU_ARCH", L"0x1B0");
 
     // An empty field becomes a null pointer, not a pointer to an empty string:
     // dlss_cuda.cpp's own fallback for the driver and the NGX runtime only
@@ -301,9 +312,9 @@ bool Processor::start(const Paths &paths, std::string &error,
     init.data_path = L".";
     init.application_id = 0;
     init.dlss_dll_path = paths.snippet.c_str();
-    init.nvcuda_dll_path = or_null(paths.cuda_driver);
+    init.nvcuda_dll_path = cuda_driver.c_str();
     init.ngx_runtime_path = or_null(paths.ngx_runtime);
-    init.nvapi_dll_path = or_null(paths.nvapi);
+    init.nvapi_dll_path = or_null(nvapi);
     if (!dlss_cuda::init(init)) {
         error = dlss_cuda::last_error();
         return false;
