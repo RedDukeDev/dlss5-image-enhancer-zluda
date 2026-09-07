@@ -10,7 +10,7 @@ I also forked Zluda's version of LLVM and made a small change which should, in t
 ## How to use
 Download the zip from the [Release section](https://github.com/RedDukeDev/dlss5-image-enhancer-zluda/releases), and run dlss5-image-enhancer.exe
 On the top-right side, you have to select the required DLLs. 
-For AMD, nvcuda.dll and nvapi64.dll are already included. they aren't the official nvidia libraries, those are actually from the Zluda project.
+For AMD, nvcuda.dll and nvapi64.dll are already included inside the "zluda" directory. they aren't the official nvidia libraries, those are actually from the Zluda project.
 
 nvngx.dll is included too, this isn't the official dll, it's a custom re-implmentation, the source is included in the project under the "ngx_runtime" directory
 
