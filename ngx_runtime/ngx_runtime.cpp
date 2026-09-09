@@ -199,6 +199,17 @@ NgxCudaDevice s_device{};
 int s_create_path = -1;
 unsigned long long g_input1 = 0, g_input2 = 0;
 bool g_use_input_params = false;
+// Which create path to take, when the caller wants to decide rather than let
+// the rules below choose: -1 leaves the choice here, 0/1/2 force one.
+//
+// It exists because the choice made here is right for the stand-in driver and
+// wrong on a real NVIDIA one. Naming our own device is a workaround for a
+// condition our own NVAPI stand-in creates -- it invites a game to bring up a
+// second DLSS in the same process, and the snippet then refuses to choose
+// between the two. On a real driver there is no stand-in, exactly one device
+// is registered, and handing the snippet an identity of our own making is
+// asking a real runtime to accept a made-up object.
+int g_forced_create_path = -1;
 PFN_NVSDK_NGX_CUDA_EvaluateFeature s_evaluate = nullptr;
 PFN_NVSDK_NGX_CUDA_ReleaseFeature s_release = nullptr;
 PFN_NVSDK_NGX_CUDA_Shutdown s_shutdown = nullptr;
@@ -313,7 +324,10 @@ __declspec(dllexport) NVSDK_NGX_Result ngxrt_create_feature(NVSDK_NGX_Feature fe
     // can itself fail with PlatformError, and "Input2" is stored at +0x3F8.
     // Both are set by the caller through ngxrt_set_inputs.
     NVSDK_NGX_Result r;
-    if (s_create1 && g_use_input_params) {
+    if (g_forced_create_path == 0) {
+        s_create_path = 0;
+        r = s_create(feature_id, params, out_handle);
+    } else if (s_create1 && g_use_input_params) {
         params->Set("Input1", g_input1);
         params->Set("Input2", g_input2);
         s_create_path = 1;
@@ -398,6 +412,11 @@ __declspec(dllexport) const char *ngxrt_build_id(void) { return __DATE__ " " __T
 __declspec(dllexport) int ngxrt_create_path(void) { return s_create_path; }
 
 __declspec(dllexport) void ngxrt_trace_params(int enable) { g_trace_params = enable != 0; }
+
+// Forces one of the three create paths, or -1 to let the runtime choose. The
+// caller knows something this file cannot: whether the CUDA driver underneath
+// is the stand-in or the real one.
+__declspec(dllexport) void ngxrt_force_create_path(int path) { g_forced_create_path = path; }
 
 __declspec(dllexport) void ngxrt_set_inputs(int enable, unsigned long long input1,
                                             unsigned long long input2) {

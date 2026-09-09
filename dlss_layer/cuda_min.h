@@ -141,11 +141,17 @@ struct CUDA_TEXTURE_DESC {
 
 constexpr unsigned int CU_CTX_SCHED_AUTO = 0;
 
+// The two attributes that name the architecture. Only these two are needed, so
+// the whole CUdevice_attribute enum is not worth copying in.
+constexpr int CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR = 75;
+constexpr int CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR = 76;
+
 struct CudaApi {
     CUresult (*cuInit)(unsigned int);
     CUresult (*cuDeviceGet)(CUdevice *, int);
     CUresult (*cuDeviceGetCount)(int *);
     CUresult (*cuDeviceGetName)(char *, int, CUdevice);
+    CUresult (*cuDeviceGetAttribute)(int *, int, CUdevice);
     CUresult (*cuCtxCreate)(CUcontext *, unsigned int, CUdevice);
     CUresult (*cuCtxDestroy)(CUcontext);
     CUresult (*cuCtxSetCurrent)(CUcontext);

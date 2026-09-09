@@ -278,7 +278,8 @@ bool Processor::start(const Paths &paths, std::string &error,
     // itself answers the question and nothing else has to: NVIDIA's own means
     // the network's machine code is already there and there is nothing to
     // translate.
-    if (!is_real_nvidia_driver(cuda_driver)) {
+    const bool real_nvidia = is_real_nvidia_driver(cuda_driver);
+    if (!real_nvidia) {
         std::string precompile_error;
         const bool ok = precompile(
             paths.snippet, paths.cuda_driver, 0,
@@ -315,6 +316,11 @@ bool Processor::start(const Paths &paths, std::string &error,
     init.nvcuda_dll_path = cuda_driver.c_str();
     init.ngx_runtime_path = or_null(paths.ngx_runtime);
     init.nvapi_dll_path = or_null(nvapi);
+    // The file itself answers this, rather than the mode the user picked:
+    // pointing the driver field at the system's own nvcuda.dll by hand is
+    // the same situation as choosing NVIDIA mode, and the workarounds meant
+    // for the stand-in are wrong in both.
+    init.nvidia_driver = real_nvidia;
     if (!dlss_cuda::init(init)) {
         error = dlss_cuda::last_error();
         return false;

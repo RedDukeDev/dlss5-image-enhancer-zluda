@@ -43,6 +43,12 @@ struct InitDesc {
 
     // Path to the CUDA driver. Null means "nvcuda.dll".
     const wchar_t *nvcuda_dll_path = nullptr;
+    // Whether the driver underneath is NVIDIA's own rather than the stand-in.
+    // Several things this layer does are workarounds for the stand-in and are
+    // wrong against a real driver: naming our own device to CreateFeature1 is
+    // the one that matters, and it exists only because our NVAPI stand-in
+    // invites a second user of the snippet into the process.
+    bool nvidia_driver = false;
     // NGX logging verbosity: 0 off, 1 on, 2 verbose. Worth leaving on, because
     // the snippet reports fatal errors to its log and then terminates the whole
     // process instead of returning a result.

@@ -5,6 +5,10 @@
 
 #include <d3d12.h>
 #include <windows.h>
+#include <softpub.h>
+#include <wintrust.h>
+
+#pragma comment(lib, "wintrust.lib")
 
 #include <cstdarg>
 #include <cstdio>
@@ -109,6 +113,9 @@ struct State {
     ID3D12GraphicsCommandList *cmd = nullptr;
 
     std::wstring snippet_path;
+    // Whether the driver underneath is NVIDIA's own. Several things here
+    // are workarounds for the stand-in and are wrong against a real one.
+    bool nvidia_driver = false;
     SharedTexture color, depth, motion, output;
     dlss_cuda::FeatureDesc current{};
     bool initialized = false;
@@ -197,6 +204,87 @@ void report_prior_snippet(const wchar_t *name) {
     if (g_reshade_log) g_reshade_log(line);
 }
 
+// Whether the snippet still carries the signature NVIDIA gave it.
+//
+// This is the one thing that decides whether the network runs on a real
+// NVIDIA driver, and nothing in the failure says so. NGX verifies the snippet
+// with Authenticode before the driver will build a feature from it, and a copy
+// modified after signing -- any patched build, whatever the patch was for --
+// fails with a hash mismatch. What comes back is CreateFeature returning
+// 0xBAD00002, which reads like a platform problem and is a refusal to trust a
+// file.
+//
+// The stand-in driver performs no such check, so on ZLUDA a patched copy runs
+// and this whole class of failure is invisible. That asymmetry is exactly why
+// it is worth stating out loud rather than leaving to be rediscovered.
+//
+// Reported, never enforced: refusing to proceed here would substitute our
+// judgement for the driver's, and the driver is the one that decides.
+const char *snippet_signature_state(const wchar_t *path) {
+    WINTRUST_FILE_INFO file{};
+    file.cbStruct = sizeof file;
+    file.pcwszFilePath = path;
+
+    GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    WINTRUST_DATA data{};
+    data.cbStruct = sizeof data;
+    data.dwUIChoice = WTD_UI_NONE;
+    data.fdwRevocationChecks = WTD_REVOKE_NONE;
+    data.dwUnionChoice = WTD_CHOICE_FILE;
+    data.pFile = &file;
+    data.dwStateAction = WTD_STATEACTION_VERIFY;
+    // The signature is embedded in the file, and asking for a revocation check
+    // would put a network round trip on the startup path for no gain here.
+    data.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL;
+
+    const LONG status = WinVerifyTrust(static_cast<HWND>(INVALID_HANDLE_VALUE), &action, &data);
+    data.dwStateAction = WTD_STATEACTION_CLOSE;
+    WinVerifyTrust(static_cast<HWND>(INVALID_HANDLE_VALUE), &action, &data);
+
+    switch (status) {
+    case ERROR_SUCCESS:
+        return "valid";
+    case TRUST_E_NOSIGNATURE:
+        return "absent";
+    case TRUST_E_BAD_DIGEST:
+        return "hash mismatch";
+    case TRUST_E_EXPLICIT_DISTRUST:
+    case CRYPT_E_SECURITY_SETTINGS:
+        return "distrusted";
+    default:
+        return "unverifiable";
+    }
+}
+
+// Says what the signature is, and what it means for the driver at hand.
+void report_snippet_signature(const wchar_t *path, bool nvidia_driver) {
+    const char *state = snippet_signature_state(path);
+    char line[768];
+    snprintf(line, sizeof line, "[dlss-cuda] snippet signature: %s\n", state);
+    OutputDebugStringA(line);
+    fputs(line, stderr);
+    if (g_reshade_log) g_reshade_log(line);
+    if (strcmp(state, "valid") == 0) return;
+
+    if (nvidia_driver) {
+        snprintf(line, sizeof line,
+                 "[dlss-cuda] on a real NVIDIA driver NGX would normally refuse to build a "
+                 "feature from this snippet with 0xBAD00002, since its signature no longer "
+                 "verifies -- every patched build included. The signature check has been "
+                 "turned off for this process (__NV_SIGNED_LOAD_CHECK=none), so it should load "
+                 "regardless. If it still fails, the copy is damaged rather than merely "
+                 "patched. A Blackwell card needs no patched snippet at all -- the original "
+                 "signed nvngx_dlssnr.dll runs natively.\n");
+    } else {
+        snprintf(line, sizeof line,
+                 "[dlss-cuda] no matter here: the stand-in driver does not verify signatures. "
+                 "A real NVIDIA driver would, and the check is turned off for this process so "
+                 "the snippet would load there too.\n");
+    }
+    OutputDebugStringA(line);
+    fputs(line, stderr);
+    if (g_reshade_log) g_reshade_log(line);
+}
 // Whether the snippet's PTX is readable at all.
 //
 // A stand-in driver compiles PTX and can do nothing with a Zstandard block, so
@@ -212,7 +300,7 @@ void report_prior_snippet(const wchar_t *name) {
 //
 // Only read on failure: it means scanning a very large file, and it earns that
 // only when there is a failure to explain.
-void report_snippet_compression(const wchar_t *path) {
+void report_snippet_compression(const wchar_t *path, bool nvidia_driver) {
     HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                               FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return;
@@ -230,11 +318,24 @@ void report_snippet_compression(const wchar_t *path) {
     CloseHandle(file);
     if (plain_ptx) return;
     char line[768];
-    snprintf(line, sizeof line,
-             "[dlss-cuda] this copy of the snippet carries no uncompressed PTX, so nothing can "
-             "be translated and every kernel lookup fails. Use a copy that does; the build "
-             "patched for RTX 20/30/40 parts does not, and this port does not need it -- the "
-             "architecture check is already answered by our NVAPI stand-in.\n");
+    if (nvidia_driver) {
+        // On a real driver nothing is translated, so missing PTX is not the
+        // same complaint. It still matters, for the opposite reason: the
+        // snippet then has only its compiled code, which is built for sm_120,
+        // and a card older than Blackwell has no PTX left to fall back on.
+        snprintf(line, sizeof line,
+                 "[dlss-cuda] this copy of the snippet carries no PTX to fall back on, so it can "
+                 "only run on the architecture its compiled code was built for -- sm_120, which is "
+                 "Blackwell. Check the compute capability reported above: below 12.0 this snippet "
+                 "has no code your GPU can run, and the patch that lets it start on RTX 20/30/40 "
+                 "parts does not give it any.\n");
+    } else {
+        snprintf(line, sizeof line,
+                 "[dlss-cuda] this copy of the snippet carries no uncompressed PTX, so nothing can "
+                 "be translated and every kernel lookup fails. Use a copy that does; the build "
+                 "patched for RTX 20/30/40 parts does not, and this port does not need it -- the "
+                 "architecture check is already answered by our NVAPI stand-in.\n");
+    }
     OutputDebugStringA(line);
     fputs(line, stderr);
     if (g_reshade_log) g_reshade_log(line);
@@ -495,6 +596,7 @@ const char *cuda_api_load(void *module, CudaApi &api) {
     LOAD(cuDeviceGet, "cuDeviceGet");
     LOAD(cuDeviceGetCount, "cuDeviceGetCount");
     LOAD(cuDeviceGetName, "cuDeviceGetName");
+    LOAD(cuDeviceGetAttribute, "cuDeviceGetAttribute");
     LOAD(cuCtxCreate, "cuCtxCreate");
     LOAD(cuCtxDestroy, "cuCtxDestroy");
     LOAD(cuCtxSetCurrent, "cuCtxSetCurrent");
@@ -573,6 +675,7 @@ bool init(const InitDesc &desc) {
         }
     }
 
+    g.nvidia_driver = desc.nvidia_driver;
     g.nvcuda = LoadLibraryW(desc.nvcuda_dll_path ? desc.nvcuda_dll_path : L"nvcuda.dll");
     if (!g.nvcuda) {
         set_error("could not load the CUDA driver (error %lu)", GetLastError());
@@ -587,9 +690,25 @@ bool init(const InitDesc &desc) {
     if (!cu_ok(g.cu.cuInit(0), "cuInit")) return false;
     CUdevice dev = 0;
     if (!cu_ok(g.cu.cuDeviceGet(&dev, 0), "cuDeviceGet")) return false;
+    // Which GPU, and which architecture it reports. This went only to the
+    // debugger before, so a report from a user never carried it -- and it is
+    // the first thing worth knowing: the neural rendering snippet is built for
+    // sm_120, and a card older than that cannot run its code whatever this
+    // program does.
     char name[256] = {};
-    if (g.cu.cuDeviceGetName(name, sizeof name, dev) == CUDA_SUCCESS)
-        OutputDebugStringA((std::string("[dlss-cuda] device: ") + name + "\n").c_str());
+    int major = 0, minor = 0;
+    if (g.cu.cuDeviceGetAttribute) {
+        g.cu.cuDeviceGetAttribute(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, dev);
+        g.cu.cuDeviceGetAttribute(&minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev);
+    }
+    if (g.cu.cuDeviceGetName(name, sizeof name, dev) == CUDA_SUCCESS) {
+        char line[384];
+        snprintf(line, sizeof line, "[dlss-cuda] device: %s (compute %d.%d)\n", name, major,
+                 minor);
+        OutputDebugStringA(line);
+        fputs(line, stderr);
+        if (g_reshade_log) g_reshade_log(line);
+    }
     if (!cu_ok(g.cu.cuCtxCreate(&g.ctx, CU_CTX_SCHED_AUTO, dev), "cuCtxCreate")) return false;
     if (!cu_ok(g.cu.cuCtxSetCurrent(g.ctx), "cuCtxSetCurrent")) return false;
 
@@ -613,6 +732,24 @@ bool init(const InitDesc &desc) {
     NGX(ngx_shutdown, "ngxrt_shutdown");
     NGX(ngx_populate, "ngxrt_populate_parameters");
 #undef NGX
+
+    // Which create path to take. Left to the runtime unless asked otherwise.
+    //
+    // Naming our own device to CreateFeature1 is a workaround for a condition
+    // our own NVAPI stand-in creates: it invites a game to bring up a second
+    // DLSS in the same process, and the snippet then refuses to choose between
+    // two registered devices with 0xBAD00002. Against a real driver that
+    // workaround is arguably wrong -- one device is registered and the identity
+    // we hand over is an object of our own making -- but the 0xBAD00002 seen on
+    // real NVIDIA hardware turned out to have a different cause entirely, the
+    // signature check below, so there is no evidence to justify changing the
+    // path there. It stays settable so the question can be answered by whoever
+    // has the hardware rather than guessed at here.
+    if (auto force = (void (*)(int))GetProcAddress(g.ngx, "ngxrt_force_create_path")) {
+        char buf[16];
+        if (GetEnvironmentVariableA("DLSS_CREATE_PATH", buf, sizeof buf) > 0)
+            force(atoi(buf));
+    }
 
     // Optional CreateFeature1 path, selected by environment so the two values
     // can be swept without rebuilding.
@@ -646,7 +783,31 @@ bool init(const InitDesc &desc) {
     SetEnvironmentVariableW(L"__NGX_ENABLE_OVERRIDE_LOG_PATH", L"1");
     if (desc.data_path) SetEnvironmentVariableW(L"__NGX_LOG_PATH_OVERRIDE", desc.data_path);
 
+    // Let a snippet whose signature does not verify load anyway.
+    //
+    // On a real NVIDIA driver the NGX core checks the snippet's Authenticode
+    // signature before building a feature from it, and a copy modified after
+    // signing -- any patched build -- is refused with 0xBAD00002. This is
+    // NVIDIA's own documented off switch for that check (see the NGX section of
+    // the Linux driver README): it names the environment variable
+    // __NV_SIGNED_LOAD_CHECK and the value "none", and unlike the registry
+    // override the modding scene uses it is scoped to this process alone -- no
+    // administrator rights, no machine-wide change, nothing left behind when the
+    // program exits. It affects only the process that sets it.
+    //
+    // Set unless the caller already decided: someone who wants the check kept
+    // can set the variable themselves and this leaves their value alone. On the
+    // stand-in driver there is no such check and this does nothing. Blackwell
+    // needs no patched snippet, but a user who reaches for one anyway is not
+    // left with an error that names no cause.
+    if (!GetEnvironmentVariableW(L"__NV_SIGNED_LOAD_CHECK", nullptr, 0))
+        SetEnvironmentVariableW(L"__NV_SIGNED_LOAD_CHECK", L"none");
+
     g.snippet_path = desc.dlss_dll_path ? desc.dlss_dll_path : L"";
+    // Before the snippet is loaded, not after it fails: this is the answer to
+    // the failure, and it costs one file read.
+    if (!g.snippet_path.empty())
+        report_snippet_signature(g.snippet_path.c_str(), g.nvidia_driver);
     report_prior_snippet(L"nvngx_dlssnr.dll");
     report_prior_snippet(L"nvngx_dlss.dll");
     if (const char *missing = g.ngx_load(desc.dlss_dll_path)) {
@@ -957,7 +1118,7 @@ bool create_feature(const FeatureDesc &desc) {
         if (g_reshade_log) g_reshade_log(line);
     }
     if (!ngx_ok(create_result, "NVSDK_NGX_CUDA_CreateFeature")) {
-        report_snippet_compression(g.snippet_path.c_str());
+        report_snippet_compression(g.snippet_path.c_str(), g.nvidia_driver);
         return false;
     }
 
