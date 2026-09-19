@@ -32,8 +32,20 @@ REM above was added) does not linger in dist\ after a later run stops
 REM producing it.
 robocopy build dist /MIR /NFL /NDL /NJH /NJS ^
     /XD CMakeFiles dlss5-image-enhancer_autogen nvngx_autogen .qt zluda ^
-    /XF CMakeCache.txt build.ninja cmake_install.cmake *.pdb *.lib *.exp .ninja_log .ninja_deps
+    /XF CMakeCache.txt build.ninja cmake_install.cmake *.pdb *.lib *.exp .ninja_log .ninja_deps ^
+        nvngx.dll
 REM robocopy's own exit codes are a bitmask where 0-7 all mean success (0 =
 REM nothing needed copying); only 8 and above is a real failure.
 if errorlevel 8 exit /b 1
+
+REM Our NGX runtime lives under zluda\, and is excluded from the mirror above so
+REM that it is not also left loose in dist\. Both modes use it: on AMD it drives
+REM the snippet's CUDA interface on the stand-in driver, on NVIDIA its D3D12 one
+REM (the direct route the working NVIDIA mods use; the driver's own NGX core is
+REM only reached with DLSS_NGX_CORE=driver). A second nvngx.dll beside the
+REM executable would only invite the wrong one to be picked up.
+if not exist "dist\zluda" mkdir "dist\zluda"
+copy /Y "build\nvngx.dll" "dist\zluda\nvngx.dll" >nul
+if errorlevel 1 exit /b 1
+if exist "dist\nvngx.dll" del /q "dist\nvngx.dll"
 exit /b 0

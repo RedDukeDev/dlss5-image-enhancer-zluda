@@ -63,6 +63,21 @@ bool is_real_nvidia_driver(const std::wstring &path) {
 
 // A library of the machine's own, named outright rather than left to a search.
 // Empty if it is not installed.
+// A file this program ships, under the zluda\ folder beside the executable.
+// Everything the AMD side needs is there: the stand-in CUDA driver, the stand-in
+// NVAPI, and this project's NGX runtime.
+std::wstring beside_executable(const wchar_t *relative) {
+    wchar_t exe[MAX_PATH];
+    const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return std::wstring();
+    std::wstring path(exe, n);
+    const size_t slash = path.find_last_of(L"/" L"\\");
+    if (slash == std::wstring::npos) return std::wstring();
+    path.resize(slash + 1);
+    path += relative;
+    return GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES ? std::wstring() : path;
+}
+
 std::wstring in_system_directory(const wchar_t *name) {
     wchar_t directory[MAX_PATH];
     const UINT length = GetSystemDirectoryW(directory, MAX_PATH);
@@ -227,18 +242,65 @@ bool Processor::start(const Paths &paths, std::string &error,
 
     // The network loads the CUDA driver itself, by the name nvcuda.dll, whatever
     // this program was pointed at, so the file has to actually be called that.
-    const bool nvidia_mode = paths.cuda_driver.empty();
+    // Nothing but the network is chosen by hand. On NVIDIA the machine's own
+    // driver and NVAPI answer; on AMD the ones shipped under zluda\ do, along
+    // with this project's NGX runtime. A path given explicitly still wins, which
+    // is what the test harnesses use.
+    const bool nvidia_mode = paths.nvidia;
     std::wstring cuda_driver = paths.cuda_driver;
     std::wstring nvapi = paths.nvapi;
+    std::wstring ngx_runtime = paths.ngx_runtime;
     if (nvidia_mode) {
-        cuda_driver = in_system_directory(L"nvcuda.dll");
+        if (cuda_driver.empty()) cuda_driver = in_system_directory(L"nvcuda.dll");
         if (cuda_driver.empty()) {
             error = "NVIDIA mode needs NVIDIA's own CUDA driver, and nvcuda.dll is not in the "
-                    "system directory. Install the driver, or switch to AMD (ZLUDA) mode and "
-                    "point the CUDA driver field at ZLUDA's nvcuda.dll.";
+                    "system directory. Install the driver, or switch to AMD (ZLUDA) mode.";
             return false;
         }
-        nvapi = in_system_directory(L"nvapi64.dll");
+        if (nvapi.empty()) nvapi = in_system_directory(L"nvapi64.dll");
+        // This program's own NGX runtime, the same file the AMD side uses. It
+        // is wanted here too: on NVIDIA the driver's own core can be used
+        // instead, but that core refuses snippets from a branch it does not
+        // know, which is what Init answering 0xBAD0000C looks like. Our runtime
+        // has no such opinion, so it is the default and the core is the
+        // alternative (DLSS_NGX_CORE=driver). Empty is not fatal -- the layer
+        // then falls back to loading nvngx.dll by bare name.
+        if (ngx_runtime.empty()) ngx_runtime = beside_executable(L"zluda\\nvngx.dll");
+    } else {
+        if (cuda_driver.empty()) cuda_driver = beside_executable(L"zluda\\nvcuda.dll");
+        if (cuda_driver.empty()) {
+            error = "AMD mode needs ZLUDA's nvcuda.dll, and it is not in the zluda folder "
+                    "beside this program. Reinstall, or switch to NVIDIA mode.";
+            return false;
+        }
+        if (nvapi.empty()) nvapi = beside_executable(L"zluda\\nvapi64.dll");
+        if (ngx_runtime.empty()) ngx_runtime = beside_executable(L"zluda\\nvngx.dll");
+        if (ngx_runtime.empty()) {
+            error = "AMD mode needs this program's own nvngx.dll, and it is not in the zluda "
+                    "folder beside this program. Reinstall.";
+            return false;
+        }
+        // Point ZLUDA at the cache this program ships under zluda\ComputeCache,
+        // unless the caller (or the user, through the environment) already
+        // named one. Shipping it precompiled is what removes the wait a user
+        // would otherwise see the first time each kernel runs -- tens of
+        // minutes for the network's largest module. An unset variable makes
+        // ZLUDA create an empty cache of its own right there and translate on
+        // demand, which is exactly today's behaviour when nothing is shipped,
+        // so a dev build with no cache folder loses nothing by this.
+        if (!GetEnvironmentVariableW(L"ZLUDA_CACHE_DIR", nullptr, 0)) {
+            wchar_t exe[MAX_PATH];
+            const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+            if (n > 0 && n < MAX_PATH) {
+                std::wstring path(exe, n);
+                const size_t slash = path.find_last_of(L"/" L"\\");
+                if (slash != std::wstring::npos) {
+                    path.resize(slash + 1);
+                    path += L"zluda\\ComputeCache";
+                    SetEnvironmentVariableW(L"ZLUDA_CACHE_DIR", path.c_str());
+                }
+            }
+        }
     }
 
     {
@@ -314,7 +376,7 @@ bool Processor::start(const Paths &paths, std::string &error,
     init.application_id = 0;
     init.dlss_dll_path = paths.snippet.c_str();
     init.nvcuda_dll_path = cuda_driver.c_str();
-    init.ngx_runtime_path = or_null(paths.ngx_runtime);
+    init.ngx_runtime_path = or_null(ngx_runtime);
     init.nvapi_dll_path = or_null(nvapi);
     // The file itself answers this, rather than the mode the user picked:
     // pointing the driver field at the system's own nvcuda.dll by hand is

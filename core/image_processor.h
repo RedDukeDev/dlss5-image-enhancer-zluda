@@ -41,7 +41,18 @@ struct Settings {
 // Where the pieces are. All of them belong to someone else; the program never
 // guesses at a location.
 struct Paths {
-    std::wstring snippet;     // nvngx_dlssnr.dll
+    // The only file the user has to find: NVIDIA's network. Everything else
+    // ships with this program or comes with the driver, so it is resolved on
+    // its own -- see Processor::start.
+    std::wstring snippet; // nvngx_dlssnr.dll
+
+    // Which side to run on. NVIDIA means the machine's own driver and NGX core;
+    // otherwise the stand-in under zluda\.
+    bool nvidia = false;
+
+    // Left empty in normal use and filled in automatically. Set only to
+    // override what would be chosen -- the test harnesses do, nothing else
+    // should.
     std::wstring cuda_driver; // nvcuda.dll, or ZLUDA standing in for it
     std::wstring ngx_runtime; // nvngx.dll
     std::wstring nvapi;       // nvapi64.dll

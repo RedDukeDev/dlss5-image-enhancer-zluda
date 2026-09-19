@@ -106,15 +106,10 @@ private:
     bool nvidia_mode_ = false;
 
     QLineEdit *snippet_path_ = nullptr;
-    QLineEdit *driver_path_ = nullptr;
-    QLineEdit *runtime_path_ = nullptr;
-    QLineEdit *nvapi_path_ = nullptr;
     // The driver/nvapi rows, hidden as a whole in NVIDIA mode -- the NGX
     // runtime row is never hidden, see set_nvidia_mode. Each is the field
     // widget passed to QFormLayout::addRow, which is also the key
     // QFormLayout::labelForField needs to reach the row's other half.
-    QWidget *driver_row_ = nullptr;
-    QWidget *nvapi_row_ = nullptr;
 
     QDoubleSpinBox *intensity_ = nullptr;
     QDoubleSpinBox *global_tone_ = nullptr;

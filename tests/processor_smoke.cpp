@@ -4,7 +4,7 @@
 // two means a failure lands in one place or the other rather than somewhere in
 // between.
 //
-// Usage: processor_smoke <input> <output.png> <snippet> <driver> [runtime] [nvapi]
+// Usage: processor_smoke <input> <output.png> <snippet> <amd|nvidia> [driver] [runtime] [nvapi]
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -109,9 +109,16 @@ int main(int argc, char **argv) {
 
     enhancer::Paths paths;
     paths.snippet = widen(argv[3]);
-    paths.cuda_driver = widen(argv[4]);
-    paths.ngx_runtime = argc > 5 ? widen(argv[5]) : L"nvngx.dll";
-    paths.nvapi = argc > 6 ? widen(argv[6]) : L"nvapi64.dll";
+    // argv[4] names the mode directly ("amd" or "nvidia") rather than being
+    // inferred from an empty driver path, so AMD's full auto-resolution --
+    // driver, NVAPI, the NGX runtime and the shipped cache, all found beside
+    // this program with nothing named -- can be exercised with every other
+    // path left empty too.
+    const std::string mode = argv[4];
+    paths.nvidia = mode == "nvidia";
+    if (argc > 5 && argv[5][0]) paths.cuda_driver = widen(argv[5]);
+    if (argc > 6 && argv[6][0]) paths.ngx_runtime = widen(argv[6]);
+    if (argc > 7 && argv[7][0]) paths.nvapi = widen(argv[7]);
 
     enhancer::Processor processor;
     std::string error;
