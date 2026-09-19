@@ -1,6 +1,5 @@
 @echo off
-REM Configures and builds with MSVC. Qt's MSVC kit is required: see the note in
-REM CMakeLists.txt for why MinGW is refused rather than merely discouraged.
+REM Configures and builds with MSVC. Qt's MSVC kit is required for this configuration
 setlocal
 if "%QT_DIR%"=="" set QT_DIR=C:\Qt\6.11.2\msvc2022_64
 set VS=C:\Program Files\Microsoft Visual Studio\18\Community
