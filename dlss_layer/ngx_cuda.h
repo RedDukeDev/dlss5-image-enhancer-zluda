@@ -27,6 +27,7 @@ constexpr NVSDK_NGX_Result NVSDK_NGX_Result_FeatureNotSupported = 0xBAD00001;
 // [LAYOUT] Feature ids. SuperSampling is the one DLSS upscaling uses.
 enum NVSDK_NGX_Feature : uint32_t {
     NVSDK_NGX_Feature_SuperSampling = 1,
+    NVSDK_NGX_Feature_NeuralRendering = 18,
 };
 
 enum NVSDK_NGX_Version : uint32_t {

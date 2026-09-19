@@ -26,6 +26,10 @@
 
 #include "ngx_cuda.h"
 
+// Only ever passed through, never used, so the D3D headers stay out of here.
+struct ID3D12Device;
+struct ID3D12GraphicsCommandList;
+
 namespace {
 
 HMODULE g_snippet = nullptr;
@@ -197,24 +201,38 @@ NgxCudaDevice s_device{};
 // Which branch ngxrt_create_feature took last: 0 plain, 1 input params, 2 named
 // device. Reported so a log says what actually ran rather than what should have.
 int s_create_path = -1;
+
+// Set through ngxrt_set_real_driver; see the note there.
+bool g_real_driver = false;
 unsigned long long g_input1 = 0, g_input2 = 0;
 bool g_use_input_params = false;
-// Which create path to take, when the caller wants to decide rather than let
-// the rules below choose: -1 leaves the choice here, 0/1/2 force one.
-//
-// It exists because the choice made here is right for the stand-in driver and
-// wrong on a real NVIDIA one. Naming our own device is a workaround for a
-// condition our own NVAPI stand-in creates -- it invites a game to bring up a
-// second DLSS in the same process, and the snippet then refuses to choose
-// between the two. On a real driver there is no stand-in, exactly one device
-// is registered, and handing the snippet an identity of our own making is
-// asking a real runtime to accept a made-up object.
-int g_forced_create_path = -1;
 PFN_NVSDK_NGX_CUDA_EvaluateFeature s_evaluate = nullptr;
 PFN_NVSDK_NGX_CUDA_ReleaseFeature s_release = nullptr;
 PFN_NVSDK_NGX_CUDA_Shutdown s_shutdown = nullptr;
 PFN_NVSDK_NGX_CUDA_PopulateParameters_Impl s_populate = nullptr;
 PFN_NVSDK_NGX_CUDA_GetScratchBufferSize s_scratch_size = nullptr;
+
+// The snippet's own D3D12 entry points, for a real NVIDIA driver.
+//
+// Init_Ext takes the version before the parameter block, unlike the public
+// D3D12_Init, and reads its logging settings from that block the same way the
+// CUDA Init_Ext does -- which is why g_init_params serves both.
+using PFN_D3D12_InitExt = NVSDK_NGX_Result (*)(unsigned long long, const wchar_t *, ID3D12Device *,
+                                               NVSDK_NGX_Version, NVSDK_NGX_Parameter *);
+using PFN_D3D12_Create = NVSDK_NGX_Result (*)(ID3D12GraphicsCommandList *, NVSDK_NGX_Feature,
+                                              NVSDK_NGX_Parameter *, NVSDK_NGX_Handle **);
+using PFN_D3D12_Evaluate = NVSDK_NGX_Result (*)(ID3D12GraphicsCommandList *, const NVSDK_NGX_Handle *,
+                                                const NVSDK_NGX_Parameter *, void *);
+using PFN_D3D12_Release = NVSDK_NGX_Result (*)(NVSDK_NGX_Handle *);
+using PFN_D3D12_Populate = NVSDK_NGX_Result (*)(NVSDK_NGX_Parameter *);
+using PFN_D3D12_Shutdown1 = NVSDK_NGX_Result (*)(ID3D12Device *);
+
+PFN_D3D12_InitExt s_d3d12_init_ext = nullptr;
+PFN_D3D12_Create s_d3d12_create = nullptr;
+PFN_D3D12_Evaluate s_d3d12_evaluate = nullptr;
+PFN_D3D12_Release s_d3d12_release = nullptr;
+PFN_D3D12_Populate s_d3d12_populate = nullptr;
+PFN_D3D12_Shutdown1 s_d3d12_shutdown1 = nullptr;
 
 template <typename T>
 bool resolve(T &slot, const char *name) {
@@ -318,6 +336,15 @@ __declspec(dllexport) const char *ngxrt_load(const wchar_t *snippet_path) {
     // Optional: not every snippet build exports it, and nothing else depends on
     // it -- it is only used to identify which feature id a snippet implements.
     resolve(s_scratch_size, "NVSDK_NGX_CUDA_GetScratchBufferSize");
+    // Optional here, required by the direct D3D12 path: that path asks
+    // ngxrt_d3d12_available and says what is missing, while the stand-in path
+    // never touches these at all.
+    resolve(s_d3d12_init_ext, "NVSDK_NGX_D3D12_Init_Ext");
+    resolve(s_d3d12_create, "NVSDK_NGX_D3D12_CreateFeature");
+    resolve(s_d3d12_evaluate, "NVSDK_NGX_D3D12_EvaluateFeature");
+    resolve(s_d3d12_release, "NVSDK_NGX_D3D12_ReleaseFeature");
+    resolve(s_d3d12_populate, "NVSDK_NGX_D3D12_PopulateParameters_Impl");
+    resolve(s_d3d12_shutdown1, "NVSDK_NGX_D3D12_Shutdown1");
     return nullptr;
 }
 
@@ -363,6 +390,7 @@ __declspec(dllexport) NVSDK_NGX_Result ngxrt_init(unsigned long long application
     return r;
 }
 
+
 // PopulateParameters_Impl fills a block the runtime owns rather than allocating
 // one, so the object is ours and only a pointer to it goes back to the caller.
 __declspec(dllexport) NVSDK_NGX_Result ngxrt_populate_parameters(NVSDK_NGX_Parameter **out_params) {
@@ -380,20 +408,25 @@ __declspec(dllexport) NVSDK_NGX_Result ngxrt_create_feature(NVSDK_NGX_Feature fe
     if (!s_create) return NVSDK_NGX_Result_Fail;
     // Pair with whichever init form ran: the feature has to be registered under
     // the same key the evaluation will look it up by.
-    // CreateFeature1 with a null first argument reads two values from the
-    // parameter block: "Input1" is passed to a method on the device data that
-    // can itself fail with PlatformError, and "Input2" is stored at +0x3F8.
-    // Both are set by the caller through ngxrt_set_inputs.
+    //
+    // This runtime normally stands in for NGX's core where there is no core to
+    // call -- the stand-in CUDA driver. It was once tried on NVIDIA's own driver
+    // too and failed with 0xBAD00002, which is why the program moved to NVIDIA's
+    // public interface there; but that attempt took the path below
+    // unconditionally, and naming our own device is precisely what a real driver
+    // rejects. With ngxrt_set_real_driver that path is now skipped on a real
+    // driver, so the old result is not evidence about what happens now.
     NVSDK_NGX_Result r;
-    if (g_forced_create_path == 0) {
-        s_create_path = 0;
-        r = s_create(feature_id, params, out_handle);
-    } else if (s_create1 && g_use_input_params) {
+    if (s_create1 && g_use_input_params) {
+        // CreateFeature1 with a null first argument reads two values from the
+        // parameter block: "Input1" is passed to a method on the device data
+        // that can itself fail with PlatformError, and "Input2" is stored at
+        // +0x3F8. Both are set by the caller through ngxrt_set_inputs.
         params->Set("Input1", g_input1);
         params->Set("Input2", g_input2);
         s_create_path = 1;
         r = s_create1(nullptr, feature_id, params, out_handle);
-    } else if (s_create1 && s_cuda_context) {
+    } else if (s_create1 && s_cuda_context && !g_real_driver) {
         // Name the device instead of letting the snippet choose. It chooses on
         // its own only while exactly one is registered; a second user of the
         // same snippet in the process -- a game bringing up its own DLSS, which
@@ -429,6 +462,81 @@ __declspec(dllexport) NVSDK_NGX_Result ngxrt_release_feature(NVSDK_NGX_Handle *h
 __declspec(dllexport) NVSDK_NGX_Result ngxrt_shutdown(void) {
     if (!s_shutdown) return NVSDK_NGX_Result_Fail;
     NVSDK_NGX_Result r = s_shutdown();
+    g_no_tail_call = 1;
+    return r;
+}
+
+// ---- The snippet's D3D12 interface, for a real NVIDIA driver ----------------
+//
+// Same one-line forwards as the CUDA ones above, for the same reason: the call
+// has to leave from this module. See the note above s_d3d12_init_ext for where
+// the shapes come from.
+
+__declspec(dllexport) int ngxrt_d3d12_available(void) {
+    return s_d3d12_init_ext && s_d3d12_create && s_d3d12_evaluate && s_d3d12_release ? 1 : 0;
+}
+
+__declspec(dllexport) NVSDK_NGX_Result ngxrt_d3d12_init(unsigned long long application_id,
+                                                        const wchar_t *data_path,
+                                                        ID3D12Device *device,
+                                                        NVSDK_NGX_Version sdk_version,
+                                                        unsigned long long log_callback,
+                                                        unsigned logging_level) {
+    if (!s_d3d12_init_ext) return NVSDK_NGX_Result_Fail;
+    g_init_params.reset_all();
+    g_init_params.Set("Log.Callback", log_callback);
+    g_init_params.Set("Minimum.Logging.Level", logging_level);
+    g_init_params.Set("Disable.Other.Logging.Sinks", 0u);
+    NVSDK_NGX_Result r = s_d3d12_init_ext(application_id, data_path, device, sdk_version, &g_init_params);
+    g_no_tail_call = 1;
+    return r;
+}
+
+// The block is this runtime's, as on the CUDA path. Without the export it is
+// handed back empty and reported as success: the reference this path follows
+// creates the feature without ever populating first.
+__declspec(dllexport) NVSDK_NGX_Result ngxrt_d3d12_populate(NVSDK_NGX_Parameter **out_params) {
+    if (!out_params) return NVSDK_NGX_Result_Fail;
+    g_feature_params.reset_all();
+    NVSDK_NGX_Result r = NVSDK_NGX_Result_Success;
+    if (s_d3d12_populate) r = s_d3d12_populate(&g_feature_params);
+    g_no_tail_call = 1;
+    *out_params = &g_feature_params;
+    return r;
+}
+
+// Records initialisation work into the command list, so the list has to be open
+// and then actually executed -- which the caller's open/submit pair does.
+__declspec(dllexport) NVSDK_NGX_Result ngxrt_d3d12_create(ID3D12GraphicsCommandList *cmd,
+                                                          NVSDK_NGX_Feature feature_id,
+                                                          NVSDK_NGX_Parameter *params,
+                                                          NVSDK_NGX_Handle **out_handle) {
+    if (!s_d3d12_create) return NVSDK_NGX_Result_Fail;
+    NVSDK_NGX_Result r = s_d3d12_create(cmd, feature_id, params, out_handle);
+    g_no_tail_call = 1;
+    return r;
+}
+
+__declspec(dllexport) NVSDK_NGX_Result ngxrt_d3d12_evaluate(ID3D12GraphicsCommandList *cmd,
+                                                            const NVSDK_NGX_Handle *handle,
+                                                            const NVSDK_NGX_Parameter *params,
+                                                            void *progress_callback) {
+    if (!s_d3d12_evaluate) return NVSDK_NGX_Result_Fail;
+    NVSDK_NGX_Result r = s_d3d12_evaluate(cmd, handle, params, progress_callback);
+    g_no_tail_call = 1;
+    return r;
+}
+
+__declspec(dllexport) NVSDK_NGX_Result ngxrt_d3d12_release(NVSDK_NGX_Handle *handle) {
+    if (!s_d3d12_release) return NVSDK_NGX_Result_Fail;
+    NVSDK_NGX_Result r = s_d3d12_release(handle);
+    g_no_tail_call = 1;
+    return r;
+}
+
+__declspec(dllexport) NVSDK_NGX_Result ngxrt_d3d12_shutdown(ID3D12Device *device) {
+    if (!s_d3d12_shutdown1) return NVSDK_NGX_Result_Fail;
+    NVSDK_NGX_Result r = s_d3d12_shutdown1(device);
     g_no_tail_call = 1;
     return r;
 }
@@ -472,12 +580,21 @@ __declspec(dllexport) const char *ngxrt_build_id(void) { return __DATE__ " " __T
 
 __declspec(dllexport) int ngxrt_create_path(void) { return s_create_path; }
 
+// Whether a real NVIDIA driver is underneath rather than the stand-in.
+//
+// It changes one decision, in ngxrt_create_feature: naming our own device to
+// CreateFeature1 is a workaround for a condition the stand-in creates -- our
+// NVAPI stand-in invites a second user of the snippet into the process, and the
+// snippet then refuses to pick a device on its own. On a real driver there is
+// no second user, the workaround is not needed, and it is actively wrong: it
+// was what made a real driver answer 0xBAD00002.
+//
+// Default stays false so the AMD path behaves exactly as before; only the
+// NVIDIA path sets it.
+__declspec(dllexport) void ngxrt_set_real_driver(int real) { g_real_driver = real != 0; }
+
 __declspec(dllexport) void ngxrt_trace_params(int enable) { g_trace_params = enable != 0; }
 
-// Forces one of the three create paths, or -1 to let the runtime choose. The
-// caller knows something this file cannot: whether the CUDA driver underneath
-// is the stand-in or the real one.
-__declspec(dllexport) void ngxrt_force_create_path(int path) { g_forced_create_path = path; }
 
 __declspec(dllexport) void ngxrt_set_inputs(int enable, unsigned long long input1,
                                             unsigned long long input2) {

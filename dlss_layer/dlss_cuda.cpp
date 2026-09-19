@@ -113,6 +113,15 @@ struct State {
     ID3D12GraphicsCommandList *cmd = nullptr;
 
     std::wstring snippet_path;
+    // Whether the NGX runtime in use is NVIDIA's own core rather than this
+    // project's stand-in. Decides which entry points are bound and who loads
+    // the snippet.
+    bool native_ngx = false;
+    // Within the D3D12 machinery, whose entry points are bound: the snippet's
+    // own, called from this project's nvngx.dll (true), or NVIDIA's core
+    // (false). native_ngx decides how the calls are made; this decides who
+    // receives them.
+    bool direct_d3d12 = false;
     // Whether the driver underneath is NVIDIA's own. Several things here
     // are workarounds for the stand-in and are wrong against a real one.
     bool nvidia_driver = false;
@@ -202,6 +211,173 @@ void report_prior_snippet(const wchar_t *name) {
     OutputDebugStringA(line);
     fputs(line, stderr);
     if (g_reshade_log) g_reshade_log(line);
+}
+
+// Where the driver keeps its NGX core.
+//
+// Not in the system directory under the obvious name: the core is _nvngx.dll,
+// with a leading underscore, and it lives in the driver store beside the
+// display driver, under DriverStore/FileRepository/nv_disp*. The name without
+// the underscore is the one an application ships, not the one the driver
+// installs, and looking for that in System32 finds nothing on a machine with a
+// perfectly good driver -- which is exactly what an RTX 5090 reported.
+//
+// Both names and both places are tried, newest driver folder first, because
+// which of them exists has moved between driver generations.
+std::wstring find_ngx_core() {
+    static const wchar_t *const kNames[] = {L"_nvngx.dll", L"nvngx.dll"};
+    const std::wstring sep = L"\\";
+
+    wchar_t sys[MAX_PATH];
+    const UINT n = GetSystemDirectoryW(sys, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return std::wstring();
+    const std::wstring system_dir(sys, n);
+
+    for (const wchar_t *name : kNames) {
+        const std::wstring direct = system_dir + sep + name;
+        if (GetFileAttributesW(direct.c_str()) != INVALID_FILE_ATTRIBUTES) return direct;
+    }
+
+    // The driver store keeps every installed release in a folder of its own, so
+    // the most recently written one belongs to the driver in use.
+    const std::wstring repository = system_dir + sep + L"DriverStore" + sep + L"FileRepository";
+    WIN32_FIND_DATAW found{};
+    HANDLE search = FindFirstFileW((repository + sep + L"nv_disp*").c_str(), &found);
+    if (search == INVALID_HANDLE_VALUE) return std::wstring();
+    std::wstring best;
+    FILETIME best_time{};
+    do {
+        if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        for (const wchar_t *name : kNames) {
+            const std::wstring candidate =
+                repository + sep + found.cFileName + sep + name;
+            if (GetFileAttributesW(candidate.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+            if (best.empty() || CompareFileTime(&found.ftLastWriteTime, &best_time) > 0) {
+                best = candidate;
+                best_time = found.ftLastWriteTime;
+            }
+            break;
+        }
+    } while (FindNextFileW(search, &found));
+    FindClose(search);
+    return best;
+}
+
+// NGX's own CUDA interface, as an application is meant to use it.
+//
+// On a machine with NVIDIA's driver the right runtime is already installed:
+// nvngx.dll in the system directory is the NGX core, and it exports the public
+// API -- NVSDK_NGX_CUDA_Init, CreateFeature, EvaluateFeature, ReleaseFeature,
+// Shutdown. The core loads the snippet itself, checks its signature, and builds
+// the device object the snippet expects.
+//
+// This project's own nvngx.dll exists because on the stand-in driver there is
+// no core to call: it reaches into the snippet's own exports instead, which are
+// a different set -- Init_Ext1 and CreateFeature1 take an NVSDK_NGX_CUDADevice
+// the core would have made. Handing those a device of our own invention is fine
+// where nothing checks it and is refused with 0xBAD00002 where something does,
+// which is what an RTX 5090 reported with a validly signed snippet. So on a
+// real driver we stop standing in for the core and let the core do its job.
+//
+// Only the two calls whose shape differs need adapting; create, release and
+// shutdown already match, and the parameter block is the same interface either
+// way.
+struct NgxPathListInfo {
+    const wchar_t *const *Path;
+    unsigned int Length;
+};
+struct NgxLoggingInfo {
+    void *LoggingCallback;
+    int MinimumLoggingLevel;
+    bool DisableOtherLoggingSinks;
+};
+struct NgxFeatureCommonInfo {
+    NgxPathListInfo PathListInfo;
+    void *InternalData;
+    NgxLoggingInfo LoggingInfo;
+};
+
+// [SDK] The requirements query, and the only declarations in this project taken
+// from NVIDIA's public SDK shapes rather than from disassembling the DLL -- so
+// unlike the [RE] entries in ngx_cuda.h, the layout below is not proven here.
+//
+// Why that is acceptable for this one call: it is a read-only query used for
+// diagnosis, it writes into deliberately oversized zeroed storage so a layout
+// that is wrong cannot overrun anything, it is called with more arguments than
+// any plausible signature needs (extra ones are ignored on x64, whereas too few
+// would leave a register holding garbage the callee might write through), and
+// the answer carries its own proof: MinHWArchitecture has to read back as
+// 0x1B0, the Blackwell value this project established separately. When it does
+// not, the layout is wrong and nothing else it reports means anything -- which
+// report_feature_requirements says out loud rather than leaving the reader to
+// trust a number that may be noise.
+//
+// What it is for: CreateFeature and Init answer with codes like 0xBAD0000B and
+// 0xBAD0000C that name no cause. This asks NVIDIA's own code the question those
+// codes hide -- is this GPU, driver and OS enough for this feature -- and gets
+// a structured answer instead of a number to interpret.
+enum NgxFeatureSupport : unsigned int {
+    NgxFeatureSupport_Supported = 0,
+    NgxFeatureSupport_CheckNotPresent = 1,
+    NgxFeatureSupport_DriverVersionUnsupported = 2,
+    NgxFeatureSupport_AdapterUnsupported = 4,
+    NgxFeatureSupport_OSVersionBelowMinimum = 8,
+    NgxFeatureSupport_HardwareUnsupported = 16,
+    NgxFeatureSupport_NotImplemented = 32,
+};
+
+struct NgxApplicationIdentifier {
+    unsigned int IdentifierType; // 0 = application id, 1 = project id
+    unsigned int Padding;
+    unsigned long long ApplicationId; // the union's largest member is 24 bytes
+    unsigned long long ProjectRest[2];
+};
+
+struct NgxFeatureDiscoveryInfo {
+    NVSDK_NGX_Version SDKVersion;
+    NVSDK_NGX_Feature FeatureID;
+    NgxApplicationIdentifier Identifier;
+    const wchar_t *ApplicationDataPath;
+    const NgxFeatureCommonInfo *FeatureInfo;
+};
+
+struct NgxFeatureRequirement {
+    unsigned int FeatureSupported;
+    unsigned int MinHWArchitecture;
+    char MinOSVersion[256];
+};
+
+// The D3D12 entry points, used instead of the CUDA ones above on a real
+// NVIDIA driver -- see the note above make_shared for why. Their shapes carry
+// a device (Init) or a command list (CreateFeature, EvaluateFeature) that the
+// CUDA entries do not, so they cannot share those globals; the thunks below
+// close over this program's own device/queue/command list (already held for
+// the D3D12 work this layer already does) and present the same shape the
+// generic g.ngx_create / g.ngx_evaluate / g.ngx_shutdown slots expect, so nothing
+// downstream of binding has to know which API is actually in use.
+NVSDK_NGX_Result (*g_native_init_d3d12)(unsigned long long, const wchar_t *, ID3D12Device *,
+                                        const NgxFeatureCommonInfo *, NVSDK_NGX_Version) = nullptr;
+NVSDK_NGX_Result (*g_native_create_d3d12)(ID3D12GraphicsCommandList *, NVSDK_NGX_Feature,
+                                          NVSDK_NGX_Parameter *, NVSDK_NGX_Handle **) = nullptr;
+NVSDK_NGX_Result (*g_native_evaluate_d3d12)(ID3D12GraphicsCommandList *, const NVSDK_NGX_Handle *,
+                                            const NVSDK_NGX_Parameter *, void *) = nullptr;
+NVSDK_NGX_Result (*g_native_shutdown_d3d12)(ID3D12Device *) = nullptr;
+// The snippet's Init_Ext, through ngxrt_d3d12_init. Its shape differs from the
+// core's D3D12_Init -- version before the parameter block, and the logging
+// settings travel inside that block -- so it cannot share the pointer above.
+NVSDK_NGX_Result (*g_direct_init_d3d12)(unsigned long long, const wchar_t *, ID3D12Device *,
+                                        NVSDK_NGX_Version, unsigned long long, unsigned) = nullptr;
+
+NVSDK_NGX_Result native_create_thunk_d3d12(NVSDK_NGX_Feature feature, NVSDK_NGX_Parameter *params,
+                                           NVSDK_NGX_Handle **out_handle) {
+    return g_native_create_d3d12(g.cmd, feature, params, out_handle);
+}
+NVSDK_NGX_Result native_evaluate_thunk_d3d12(NVSDK_NGX_Handle *handle,
+                                             const NVSDK_NGX_Parameter *params) {
+    return g_native_evaluate_d3d12(g.cmd, handle, params, nullptr);
+}
+NVSDK_NGX_Result native_shutdown_thunk_d3d12(void) {
+    return g_native_shutdown_d3d12(g.device);
 }
 
 // Whether the snippet still carries the signature NVIDIA gave it.
@@ -353,6 +529,87 @@ void report_snippet_compression(const wchar_t *path, bool nvidia_driver) {
     if (g_reshade_log) g_reshade_log(line);
 }
 
+// What NVIDIA's own code says this feature needs, asked before Init gets the
+// chance to refuse with a code that names no cause. See the [SDK] note above
+// NgxFeatureDiscoveryInfo for why this is written as carefully as it is, and
+// why its own answer has to be checked before it is believed.
+void report_feature_requirements(HMODULE core, NVSDK_NGX_Feature feature,
+                                 unsigned long long app_id, const wchar_t *data_path,
+                                 const NgxFeatureCommonInfo *info) {
+    char line[1024];
+    const auto say = [&line]() {
+        OutputDebugStringA(line);
+        fputs(line, stderr);
+        fflush(stderr);
+        if (g_reshade_log) g_reshade_log(line);
+    };
+
+    // Four parameters where no plausible signature takes more than three: an
+    // argument too many is ignored on x64, an argument too few leaves a
+    // register holding whatever was there and the callee may write through it.
+    auto query = (NVSDK_NGX_Result(*)(const void *, void *, void *, void *))GetProcAddress(
+        core, "NVSDK_NGX_CUDA_GetFeatureRequirements");
+    if (!query) {
+        snprintf(line, sizeof line,
+                 "[dlss-cuda] the NGX core exports no NVSDK_NGX_CUDA_GetFeatureRequirements, so "
+                 "what it requires cannot be asked for here\n");
+        say();
+        return;
+    }
+
+    // Oversized and zeroed: a layout that is wrong then writes inside this
+    // storage instead of past it.
+    alignas(16) unsigned char discovery_storage[512] = {};
+    alignas(16) unsigned char requirement_storage[1024] = {};
+    auto *discovery = reinterpret_cast<NgxFeatureDiscoveryInfo *>(discovery_storage);
+    auto *requirement = reinterpret_cast<NgxFeatureRequirement *>(requirement_storage);
+    discovery->SDKVersion = NVSDK_NGX_Version_API;
+    discovery->FeatureID = feature;
+    discovery->Identifier.IdentifierType = 0; // by application id
+    discovery->Identifier.ApplicationId = app_id;
+    discovery->ApplicationDataPath = data_path;
+    discovery->FeatureInfo = info;
+
+    const NVSDK_NGX_Result r = query(discovery, requirement, requirement, requirement);
+
+    // The Blackwell value this project established by other means. It is the
+    // only thing here that can tell a real answer from a misread buffer.
+    const unsigned int kBlackwell = 0x1B0;
+    const bool trustworthy = requirement->MinHWArchitecture == kBlackwell;
+
+    char flags[256] = {};
+    const unsigned int s = requirement->FeatureSupported;
+    if (s == NgxFeatureSupport_Supported) {
+        strncpy(flags, "supported", sizeof flags - 1);
+    } else {
+        if (s & NgxFeatureSupport_CheckNotPresent) strncat(flags, "check-not-present ", 32);
+        if (s & NgxFeatureSupport_DriverVersionUnsupported) strncat(flags, "DRIVER-TOO-OLD ", 32);
+        if (s & NgxFeatureSupport_AdapterUnsupported) strncat(flags, "ADAPTER-UNSUPPORTED ", 32);
+        if (s & NgxFeatureSupport_OSVersionBelowMinimum) strncat(flags, "OS-TOO-OLD ", 32);
+        if (s & NgxFeatureSupport_HardwareUnsupported) strncat(flags, "HARDWARE-UNSUPPORTED ", 32);
+        if (s & NgxFeatureSupport_NotImplemented) strncat(flags, "not-implemented ", 32);
+        if (!flags[0]) strncpy(flags, "unrecognised", sizeof flags - 1);
+    }
+
+    // MinOSVersion is only text if the rest read true; print it guarded either
+    // way so a misread cannot dump arbitrary bytes into the log.
+    char os_version[64] = {};
+    for (size_t i = 0; i + 1 < sizeof os_version; ++i) {
+        const char c = requirement->MinOSVersion[i];
+        if (c == '\0') break;
+        os_version[i] = (c >= 0x20 && c < 0x7f) ? c : '?';
+    }
+
+    snprintf(line, sizeof line,
+             "[dlss-cuda] feature requirements: result 0x%08X, support 0x%X (%s), minimum "
+             "architecture 0x%X, minimum OS \"%s\" -- %s\n",
+             r, s, flags, requirement->MinHWArchitecture, os_version,
+             trustworthy ? "architecture matches the expected 0x1B0, so this reading is sound"
+                         : "architecture does NOT match the expected 0x1B0: the struct layout is "
+                           "wrong and none of these values mean anything");
+    say();
+}
+
 // The runtime is missing one of its exports.
 //
 // Worth a sentence rather than a code: these exports belong to this project's
@@ -438,6 +695,18 @@ bool make_shared(SharedTexture &t, uint32_t width, uint32_t height, DXGI_FORMAT 
     if (FAILED(hr)) {
         set_error("CreateSharedHandle failed: 0x%08lX", hr);
         return false;
+    }
+
+    // NVIDIA's own D3D12 NGX interface takes the resource exactly as it is --
+    // no cross-API import, no descriptor wrapper naming which CUDA object kind
+    // holds it. All of that exists only for the CUDA interface, and only the
+    // stand-in ever calls into that one; native mode returns here.
+    if (g.native_ngx) {
+        t.width = width;
+        t.height = height;
+        t.format = format;
+        t.read_write = allow_unordered_access;
+        return true;
     }
 
     const D3D12_RESOURCE_ALLOCATION_INFO info = g.device->GetResourceAllocationInfo(0, 1, &desc);
@@ -563,6 +832,30 @@ void *resource_handle(SharedTexture &t) {
 }
 
 // Blocks until the GPU has drained the queue.
+bool flush_and_wait();
+
+// Opens g.cmd for recording. Only meaningful in native mode: the CUDA NGX
+// entries are synchronous and never touch it, but NVIDIA's D3D12 ones record
+// GPU work into whatever command list they are handed, and g.cmd otherwise
+// sits closed from init() until the next per-frame Reset -- calling through
+// it unopened is a command list in the wrong state, not a platform fault.
+void open_cmd_if_native() {
+    if (!g.native_ngx) return;
+    g.allocator->Reset();
+    g.cmd->Reset(g.allocator, nullptr);
+}
+
+// The other half: closes what a native call recorded, submits it, and waits
+// for the GPU, since NGX only records -- nothing it asked for actually runs
+// until the caller submits the list itself.
+bool submit_and_wait_if_native() {
+    if (!g.native_ngx) return true;
+    g.cmd->Close();
+    ID3D12CommandList *lists[] = {g.cmd};
+    g.queue->ExecuteCommandLists(1, lists);
+    return flush_and_wait();
+}
+
 bool flush_and_wait() {
     const UINT64 target = ++g.fence_value;
     if (FAILED(g.queue->Signal(g.fence, target))) {
@@ -649,6 +942,11 @@ const char *cuda_api_load(void *module, CudaApi &api) {
 
 namespace dlss_cuda {
 
+// Defined further down, and it ignores its argument -- declared here so init()
+// can ask the requirements query for the same feature id CreateFeature will
+// later be given.
+NVSDK_NGX_Feature feature_id(Feature);
+
 void set_log_sink(void (*sink)(const char *)) { g_reshade_log = sink; }
 
 bool hold_device_memory(size_t bytes) {
@@ -724,44 +1022,149 @@ bool init(const InitDesc &desc) {
     if (!cu_ok(g.cu.cuCtxCreate(&g.ctx, CU_CTX_SCHED_AUTO, dev), "cuCtxCreate")) return false;
     if (!cu_ok(g.cu.cuCtxSetCurrent(g.ctx), "cuCtxSetCurrent")) return false;
 
-    g.ngx = LoadLibraryW(desc.ngx_runtime_path ? desc.ngx_runtime_path : L"nvngx.dll");
-    if (!g.ngx) {
-        set_error("could not load the NGX runtime nvngx.dll (error %lu)", GetLastError());
-        return false;
-    }
-    report_module(desc.ngx_runtime_path, g.ngx);
-
-#define NGX(field, name)                                                            \
-    do {                                                                            \
-        *reinterpret_cast<void **>(&g.field) = (void *)GetProcAddress(g.ngx, name); \
-        if (!g.field) return missing_runtime_export(desc.ngx_runtime_path, name);   \
-    } while (0)
-    NGX(ngx_load, "ngxrt_load");
-    NGX(ngx_init_ext, "ngxrt_init");
-    NGX(ngx_create, "ngxrt_create_feature");
-    NGX(ngx_evaluate, "ngxrt_evaluate");
-    NGX(ngx_release, "ngxrt_release_feature");
-    NGX(ngx_shutdown, "ngxrt_shutdown");
-    NGX(ngx_populate, "ngxrt_populate_parameters");
-#undef NGX
-
-    // Which create path to take. Left to the runtime unless asked otherwise.
+    // Who drives the snippet, and through which interface:
     //
-    // Naming our own device to CreateFeature1 is a workaround for a condition
-    // our own NVAPI stand-in creates: it invites a game to bring up a second
-    // DLSS in the same process, and the snippet then refuses to choose between
-    // two registered devices with 0xBAD00002. Against a real driver that
-    // workaround is arguably wrong -- one device is registered and the identity
-    // we hand over is an object of our own making -- but the 0xBAD00002 seen on
-    // real NVIDIA hardware turned out to have a different cause entirely, the
-    // signature check below, so there is no evidence to justify changing the
-    // path there. It stays settable so the question can be answered by whoever
-    // has the hardware rather than guessed at here.
-    if (auto force = (void (*)(int))GetProcAddress(g.ngx, "ngxrt_force_create_path")) {
+    //   stand-in driver (AMD)         this project's nvngx.dll, CUDA entries
+    //   NVIDIA, default               this project's nvngx.dll, the snippet's
+    //                                 own D3D12 entries, feature 18
+    //   NVIDIA, DLSS_NGX_CORE=driver  NVIDIA's core (_nvngx.dll), D3D12
+    //
+    // native_ngx is the D3D12 machinery -- command list recording, plain
+    // ID3D12Resource parameters, no CUDA import -- which both NVIDIA routes
+    // need. direct_d3d12 only picks whose entry points get bound. See
+    // driver_ngx_core in dlss_cuda.h for why the direct route is the default.
+    g.native_ngx = desc.nvidia_driver;
+    g.direct_d3d12 = desc.nvidia_driver && !desc.driver_ngx_core;
+    {
         char buf[16];
-        if (GetEnvironmentVariableA("DLSS_CREATE_PATH", buf, sizeof buf) > 0)
-            force(atoi(buf));
+        if (desc.nvidia_driver && GetEnvironmentVariableA("DLSS_NGX_CORE", buf, sizeof buf) > 0) {
+            if (_stricmp(buf, "driver") == 0) g.direct_d3d12 = false;
+            if (_stricmp(buf, "runtime") == 0) g.direct_d3d12 = true;
+        }
     }
+    {
+        char line[256];
+        snprintf(line, sizeof line, "[dlss-cuda] NGX runtime: %s\n",
+                 g.direct_d3d12 ? "this project's nvngx.dll, driving the snippet's own D3D12 interface"
+                 : g.native_ngx ? "NVIDIA's own core (the driver's _nvngx.dll)"
+                                : "this project's nvngx.dll, driving the snippet's CUDA interface");
+        OutputDebugStringA(line);
+        fputs(line, stderr);
+        if (g_reshade_log) g_reshade_log(line);
+    }
+    if (g.direct_d3d12) {
+        g.ngx = LoadLibraryW(desc.ngx_runtime_path ? desc.ngx_runtime_path : L"nvngx.dll");
+        if (!g.ngx) {
+            set_error("could not load the NGX runtime nvngx.dll (error %lu)", GetLastError());
+            return false;
+        }
+        report_module(desc.ngx_runtime_path, g.ngx);
+
+    #define NGX_DIRECT(target, name)                                                    \
+        do {                                                                            \
+            *reinterpret_cast<void **>(&target) = (void *)GetProcAddress(g.ngx, name);  \
+            if (!target) return missing_runtime_export(desc.ngx_runtime_path, name);    \
+        } while (0)
+        // The same D3D12 slots the core route fills, so everything past binding
+        // -- the open/submit around each call, plain resources in the parameter
+        // block -- is shared. Only who answers differs.
+        NGX_DIRECT(g.ngx_load, "ngxrt_load");
+        NGX_DIRECT(g_direct_init_d3d12, "ngxrt_d3d12_init");
+        NGX_DIRECT(g_native_create_d3d12, "ngxrt_d3d12_create");
+        NGX_DIRECT(g_native_evaluate_d3d12, "ngxrt_d3d12_evaluate");
+        NGX_DIRECT(g_native_shutdown_d3d12, "ngxrt_d3d12_shutdown");
+        NGX_DIRECT(g.ngx_release, "ngxrt_d3d12_release");
+        NGX_DIRECT(g.ngx_populate, "ngxrt_d3d12_populate");
+    #undef NGX_DIRECT
+        g.ngx_create = native_create_thunk_d3d12;
+        g.ngx_evaluate = native_evaluate_thunk_d3d12;
+        g.ngx_shutdown = native_shutdown_thunk_d3d12;
+    } else if (g.native_ngx) {
+        const std::wstring core = find_ngx_core();
+        if (core.empty()) {
+            set_error("NVIDIA mode needs NVIDIA's own NGX runtime, and neither _nvngx.dll "
+                      "nor nvngx.dll was found in the system directory or in the driver "
+                      "store. Install or repair the display driver, or switch to AMD mode.");
+            return false;
+        }
+        g.ngx = LoadLibraryW(core.c_str());
+        if (!g.ngx) {
+            set_error("could not load %ls (error %lu)", core.c_str(), GetLastError());
+            return false;
+        }
+        report_module(core.c_str(), g.ngx);
+
+#define NGX_NATIVE(target, name)                                                   \
+    do {                                                                           \
+        *reinterpret_cast<void **>(&target) = (void *)GetProcAddress(g.ngx, name); \
+        if (!target) {                                                             \
+            set_error("%ls does not export %s", core.c_str(), name);                \
+            return false;                                                          \
+        }                                                                          \
+    } while (0)
+        // D3D12, not CUDA. This program already holds a D3D12 device, queue
+        // and command list for the compute work it does either way, so there
+        // is nothing missing to make the switch: no CUDA context, no
+        // cross-API resource import, no descriptor wrapper naming which CUDA
+        // object kind holds an image -- see the note above make_shared. Only
+        // ReleaseFeature and GetCapabilityParameters keep the exact shape the
+        // CUDA entries already have, so only their symbol names change here.
+        //
+        // This was first tried on the theory that CreateFeature's 0xBAD0000B
+        // (UnableToInitializeFeature) meant regular DLSS Super Resolution had
+        // to be registered alongside Neural Rendering, and that the CUDA
+        // interface carried that dependency where D3D12 would not -- grounded
+        // in one working public tool for this feature that ships no such
+        // sibling snippet. Switching API did not change the failure: the same
+        // 0xBAD0000B came back over D3D12 too, on the very first attempt, so
+        // that theory is wrong, or at least not the whole story. A real defect
+        // was found and fixed here -- NVSDK_NGX_D3D12_CreateFeature and
+        // EvaluateFeature record GPU work into whatever command list they are
+        // handed, and g.cmd sat closed since init(); see open_cmd_if_native /
+        // submit_and_wait_if_native -- but it was not the cause either: testers
+        // still got 0xBAD0000B with it in place. The route itself is. A working
+        // NVIDIA implementation documents CreateFeature(18) through this core
+        // failing the same way, and drives the snippet's own D3D12 entries
+        // instead, which is now the default (direct_d3d12). This branch stays
+        // for comparison, behind DLSS_NGX_CORE=driver.
+        NGX_NATIVE(g_native_init_d3d12, "NVSDK_NGX_D3D12_Init");
+        NGX_NATIVE(g_native_create_d3d12, "NVSDK_NGX_D3D12_CreateFeature");
+        NGX_NATIVE(g_native_evaluate_d3d12, "NVSDK_NGX_D3D12_EvaluateFeature");
+        NGX_NATIVE(g_native_shutdown_d3d12, "NVSDK_NGX_D3D12_Shutdown1");
+        NGX_NATIVE(g.ngx_release, "NVSDK_NGX_D3D12_ReleaseFeature");
+        NGX_NATIVE(g.ngx_populate, "NVSDK_NGX_D3D12_GetCapabilityParameters");
+#undef NGX_NATIVE
+        g.ngx_create = native_create_thunk_d3d12;
+        g.ngx_evaluate = native_evaluate_thunk_d3d12;
+        g.ngx_shutdown = native_shutdown_thunk_d3d12;
+    } else {
+        g.ngx = LoadLibraryW(desc.ngx_runtime_path ? desc.ngx_runtime_path : L"nvngx.dll");
+        if (!g.ngx) {
+            set_error("could not load the NGX runtime nvngx.dll (error %lu)", GetLastError());
+            return false;
+        }
+        report_module(desc.ngx_runtime_path, g.ngx);
+
+    #define NGX(field, name)                                                            \
+        do {                                                                            \
+            *reinterpret_cast<void **>(&g.field) = (void *)GetProcAddress(g.ngx, name); \
+            if (!g.field) return missing_runtime_export(desc.ngx_runtime_path, name);   \
+        } while (0)
+        NGX(ngx_load, "ngxrt_load");
+        NGX(ngx_init_ext, "ngxrt_init");
+        NGX(ngx_create, "ngxrt_create_feature");
+        NGX(ngx_evaluate, "ngxrt_evaluate");
+        NGX(ngx_release, "ngxrt_release_feature");
+        NGX(ngx_shutdown, "ngxrt_shutdown");
+        NGX(ngx_populate, "ngxrt_populate_parameters");
+    #undef NGX
+    }
+
+    // Tell the runtime which driver is underneath, so it can leave the stand-in
+    // workaround alone on a real one. Absent on an older copy of nvngx.dll,
+    // which then behaves as it always did.
+    if (auto set_real = (void (*)(int))GetProcAddress(g.ngx, "ngxrt_set_real_driver"))
+        set_real(g.nvidia_driver ? 1 : 0);
 
     // Optional CreateFeature1 path, selected by environment so the two values
     // can be swept without rebuilding.
@@ -822,13 +1225,34 @@ bool init(const InitDesc &desc) {
         report_snippet_signature(g.snippet_path.c_str(), g.nvidia_driver);
     report_prior_snippet(L"nvngx_dlssnr.dll");
     report_prior_snippet(L"nvngx_dlss.dll");
-    if (const char *missing = g.ngx_load(desc.dlss_dll_path)) {
-        set_error("the NGX runtime could not load %s", missing);
-        return false;
+    // This project's runtime has to be handed the snippet, on either interface;
+    // NVIDIA's core finds it itself, and is told where to look through the path
+    // list below.
+    if (!g.native_ngx || g.direct_d3d12) {
+        if (const char *missing = g.ngx_load(desc.dlss_dll_path)) {
+            set_error("the NGX runtime could not load %s", missing);
+            return false;
+        }
+        if (g.direct_d3d12) {
+            auto available = (int (*)(void))GetProcAddress(g.ngx, "ngxrt_d3d12_available");
+            if (!available || !available()) {
+                set_error("this nvngx_dlssnr.dll does not export the D3D12 entry points the "
+                          "direct route needs (NVSDK_NGX_D3D12_Init_Ext, CreateFeature, "
+                          "EvaluateFeature, ReleaseFeature)");
+                return false;
+            }
+        }
     }
-    {
-        // The snippet too: a game that ships DLSS already has one of these
-        // loaded, and it will not be the one sitting beside the addon.
+    // The snippet too: a game that ships DLSS already has one of these loaded,
+    // and it will not be the one sitting beside the addon. Only meaningful once
+    // something has actually loaded it: on the stand-in that is g.ngx_load just
+    // above, but the native core loads it lazily, inside CreateFeature, so at
+    // this point in native mode nothing has tried yet and GetModuleHandleW
+    // correctly returns null. report_module used to read that as "some other
+    // module answered", because its own placeholder for "nothing loaded" is the
+    // literal string "?", which of course never equals the path asked for --
+    // this fired on every native run and was never about a real conflict.
+    if (!g.native_ngx || g.direct_d3d12) {
         const wchar_t *base = wcsrchr(desc.dlss_dll_path, L'\\');
         report_module(desc.dlss_dll_path, GetModuleHandleW(base ? base + 1 : desc.dlss_dll_path));
     }
@@ -837,11 +1261,72 @@ bool init(const InitDesc &desc) {
     // returning, so its log is the only way to see why. Wire it to a sink by
     // default -- the messages go to the debugger output, which ReShade's log
     // and any attached debugger both pick up.
-    if (!ngx_ok(g.ngx_init_ext(desc.application_id, desc.data_path, NVSDK_NGX_Version_API,
-                               (unsigned long long)(void *)&ngx_log_sink, desc.log_level,
-                               g.ctx),
-                "NVSDK_NGX_CUDA_Init_Ext"))
+    if (g.native_ngx) {
+        // The directory holding the snippet, given to NGX as a place to search.
+        // This is the documented way to point the core at a copy other than the
+        // one in the driver store, and it is what lets the user keep choosing
+        // the file.
+        static std::wstring snippet_dir;
+        snippet_dir = g.snippet_path;
+        const size_t slash = snippet_dir.find_last_of(L"/" L"\\");
+        snippet_dir = slash == std::wstring::npos ? L"." : snippet_dir.substr(0, slash);
+        static const wchar_t *paths[1];
+        paths[0] = snippet_dir.c_str();
+        static NgxFeatureCommonInfo info;
+        info = NgxFeatureCommonInfo{};
+        info.PathListInfo.Path = paths;
+        info.PathListInfo.Length = 1;
+        info.LoggingInfo.LoggingCallback = (void *)&ngx_log_sink;
+        info.LoggingInfo.MinimumLoggingLevel = (int)desc.log_level;
+        info.LoggingInfo.DisableOtherLoggingSinks = false;
+
+        // The core looks in that directory for "nvngx_dlssnr.dll" by name -- it
+        // never opens the file this program was pointed at. Pointed at the
+        // upscaler, or at a renamed copy, the search finds nothing, the driver
+        // store answers instead with a build that has no neural rendering in
+        // it, and the user is left with 0xBAD0000B from CreateFeature and no
+        // hint that the wrong file was chosen. Say it here, where the folder
+        // being searched is known.
+        // Only the core searches by name; the direct route loads the chosen file.
+        if (!g.direct_d3d12) {
+            const std::wstring wanted = snippet_dir + L"\\nvngx_dlssnr.dll";
+            if (GetFileAttributesW(wanted.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                char line[768];
+                snprintf(line, sizeof line,
+                         "[dlss-cuda] WARNING: no nvngx_dlssnr.dll in the folder handed to NGX to "
+                         "search. NVIDIA's core looks for that exact name and opens the chosen "
+                         "file never -- so a snippet named anything else, the upscaler "
+                         "nvngx_dlss.dll included, leaves it with nothing to load and "
+                         "CreateFeature fails with 0xBAD0000B.\n");
+                OutputDebugStringA(line);
+                fputs(line, stderr);
+                fflush(stderr);
+                if (g_reshade_log) g_reshade_log(line);
+            }
+        }
+
+        if (g.direct_d3d12) {
+            if (!ngx_ok(g_direct_init_d3d12(desc.application_id, desc.data_path, g.device,
+                                            NVSDK_NGX_Version_API,
+                                            (unsigned long long)(void *)&ngx_log_sink,
+                                            desc.log_level),
+                        "NVSDK_NGX_D3D12_Init_Ext"))
+                return false;
+        } else {
+            // A query of the core, so only meaningful on the core route.
+            report_feature_requirements(g.ngx, feature_id(Feature::NeuralRendering),
+                                        desc.application_id, desc.data_path, &info);
+            if (!ngx_ok(g_native_init_d3d12(desc.application_id, desc.data_path, g.device, &info,
+                                            NVSDK_NGX_Version_API),
+                        "NVSDK_NGX_D3D12_Init"))
+                return false;
+        }
+    } else if (!ngx_ok(g.ngx_init_ext(desc.application_id, desc.data_path, NVSDK_NGX_Version_API,
+                                      (unsigned long long)(void *)&ngx_log_sink, desc.log_level,
+                                      g.ctx),
+                       "NVSDK_NGX_CUDA_Init_Ext")) {
         return false;
+    }
 
     // Diagnostic: register a foreign device the way another user of the same
     // snippet in the process does. CreateFeature picks a device by itself only
@@ -864,8 +1349,26 @@ bool init(const InitDesc &desc) {
     // NGX allocates the parameter block; PopulateParameters_Impl fills in the
     // capability entries the feature needs.
     g.params = nullptr;
-    if (!ngx_ok(g.ngx_populate(&g.params), "NVSDK_NGX_CUDA_PopulateParameters_Impl"))
-        return false;
+    {
+        const NVSDK_NGX_Result populated = g.ngx_populate(&g.params);
+        if (g.direct_d3d12 && !NVSDK_NGX_SUCCEED(populated) && g.params) {
+            // Reported, not fatal: the block is this project's and usable either
+            // way, and the working implementation the direct route follows creates
+            // the feature without ever populating first.
+            char line[256];
+            snprintf(line, sizeof line,
+                     "[dlss-cuda] NVSDK_NGX_D3D12_PopulateParameters_Impl returned 0x%08X; "
+                     "continuing with an empty block\n",
+                     populated);
+            OutputDebugStringA(line);
+            fputs(line, stderr);
+            if (g_reshade_log) g_reshade_log(line);
+        } else if (!ngx_ok(populated, g.direct_d3d12 ? "NVSDK_NGX_D3D12_PopulateParameters_Impl"
+                                      : g.native_ngx ? "NVSDK_NGX_D3D12_GetCapabilityParameters"
+                                                     : "NVSDK_NGX_CUDA_PopulateParameters_Impl")) {
+            return false;
+        }
+    }
     if (!g.params) {
         set_error("NGX returned a null parameter block");
         return false;
@@ -890,15 +1393,23 @@ bool init(const InitDesc &desc) {
     return true;
 }
 
-// A snippet implements one feature and, as the id sweep showed, does not check
-// the id it is given -- GetScratchBufferSize accepts every value from 0 to 64.
-// The real selection is which DLL got loaded. SuperSampling is passed for both
-// because it is the one id known to be accepted, and DLSS_FEATURE_ID is there
-// for the case where a build turns out to care.
-NVSDK_NGX_Feature feature_id(Feature) {
+// Which id CreateFeature is given.
+//
+// On the stand-in it is SuperSampling, and that works: a snippet implements one
+// feature and, as the id sweep showed, its own GetScratchBufferSize accepts
+// every value from 0 to 64, so there the real selection is which DLL got
+// loaded.
+//
+// On a real NVIDIA driver neural rendering is 18, because that is what every
+// working NVIDIA implementation passes -- see NVSDK_NGX_Feature_NeuralRendering
+// in ngx_cuda.h -- and it is the id NVIDIA's core routes by, which 1 does not
+// reach. DLSS_FEATURE_ID overrides either.
+NVSDK_NGX_Feature feature_id(Feature feature) {
     char buf[16];
     if (GetEnvironmentVariableA("DLSS_FEATURE_ID", buf, sizeof buf) > 0)
         return (NVSDK_NGX_Feature)atoi(buf);
+    if (g.nvidia_driver && feature == Feature::NeuralRendering)
+        return NVSDK_NGX_Feature_NeuralRendering;
     return NVSDK_NGX_Feature_SuperSampling;
 }
 
@@ -943,18 +1454,30 @@ void set_create_params_nr(const FeatureDesc &desc) {
     g.params->Set(ngx_param::VisibilityNodeMask, 1u);
 }
 
+// Hands the snippet one image. The stand-in wants the CUDA texture/surface
+// wrapper resource_handle builds; NVIDIA's own D3D12 interface takes the
+// plain resource directly -- see the note above make_shared for why there is
+// no wrapper to build at all on that path.
+void set_image_param(const char *name, SharedTexture &t) {
+    if (g.native_ngx) {
+        g.params->Set(name, t.resource);
+    } else {
+        g.params->Set(name, resource_handle(t));
+    }
+}
+
 // The per-frame half of the neural rendering set: the four buffers, and the
 // controls over the effect.
 void set_frame_params_nr(const FeatureDesc &create, const NeuralRenderingDesc &nr,
                          const FrameDesc &frame) {
-    g.params->Set(nr_param::Color, resource_handle(g.color));
-    g.params->Set(nr_param::Depth, resource_handle(g.depth));
-    g.params->Set(nr_param::MVec, resource_handle(g.motion));
-    g.params->Set(nr_param::Output, resource_handle(g.output));
+    set_image_param(nr_param::Color, g.color);
+    set_image_param(nr_param::Depth, g.depth);
+    set_image_param(nr_param::MVec, g.motion);
+    set_image_param(nr_param::Output, g.output);
     // The network alters the finished image, so it also asks for the buffer that
     // image lives in. Here that is the same texture it writes to; a caller with
     // a real frame would pass the swapchain's.
-    g.params->Set(nr_param::Backbuffer, resource_handle(g.output));
+    set_image_param(nr_param::Backbuffer, g.output);
 
     g.params->Set(nr_param::MVecScaleX, frame.mv_scale_x * nr.mv_scale_multiplier_x);
     g.params->Set(nr_param::MVecScaleY, frame.mv_scale_y * nr.mv_scale_multiplier_y);
@@ -1104,12 +1627,32 @@ bool create_feature(const FeatureDesc &desc) {
     }
 
     report_device_count("before CreateFeature");
+    // NVSDK_NGX_D3D12_CreateFeature records GPU work into the command list it
+    // is handed -- unlike the CUDA entry, which is synchronous and never
+    // touches g.cmd at all -- so on the native path it needs one that is open
+    // for recording, and the recorded work has to actually be submitted
+    // afterward for anything to happen. g.cmd sits closed from init() until
+    // the next per-frame Reset, so calling through it here unopened is a
+    // command list in the wrong state, not a platform fault; NGX's own error
+    // for that turned out to be exactly as uninformative as 0xBAD0000B always
+    // is elsewhere in this API.
+    open_cmd_if_native();
     const NVSDK_NGX_Result create_result =
         g.ngx_create(feature_id(desc.feature), g.params, &g.feature);
+    submit_and_wait_if_native();
     // Which branch the runtime actually took. A fix that lives in nvngx.dll does
     // nothing if an older copy of that file is the one beside the addon, and the
     // return code alone cannot tell the two apart.
-    if (auto path = (int (*)(void))GetProcAddress(g.ngx, "ngxrt_create_path")) {
+    if (g.native_ngx) {
+        const char *line =
+            g.direct_d3d12
+                ? "[dlss-cuda] NGX core: none -- the snippet's own D3D12 interface, called from "
+                  "this project's nvngx.dll\n"
+                : "[dlss-cuda] NGX core: NVIDIA's own, public D3D12 interface\n";
+        OutputDebugStringA(line);
+        fputs(line, stderr);
+        if (g_reshade_log) g_reshade_log(line);
+    } else if (auto path = (int (*)(void))GetProcAddress(g.ngx, "ngxrt_create_path")) {
         auto build = (const char *(*)(void))GetProcAddress(g.ngx, "ngxrt_build_id");
         static const char *const kPaths[] = {"plain CreateFeature",
                                              "CreateFeature1 with input params",
@@ -1129,7 +1672,8 @@ bool create_feature(const FeatureDesc &desc) {
         fputs(line, stderr);
         if (g_reshade_log) g_reshade_log(line);
     }
-    if (!ngx_ok(create_result, "NVSDK_NGX_CUDA_CreateFeature")) {
+    if (!ngx_ok(create_result, g.native_ngx ? "NVSDK_NGX_D3D12_CreateFeature"
+                                            : "NVSDK_NGX_CUDA_CreateFeature")) {
         report_snippet_compression(g.snippet_path.c_str(), g.nvidia_driver);
         return false;
     }
@@ -1209,15 +1753,19 @@ static bool evaluate_ngx(const FrameDesc &frame) {
     // than a surface object.
     if (g.current.feature == Feature::NeuralRendering) {
         set_frame_params_nr(g.current, g.current.neural, frame);
-        if (!ngx_ok(g.ngx_evaluate(g.feature, g.params), "NVSDK_NGX_CUDA_EvaluateFeature"))
+        open_cmd_if_native();
+        const NVSDK_NGX_Result r = g.ngx_evaluate(g.feature, g.params);
+        submit_and_wait_if_native();
+        if (!ngx_ok(r, g.native_ngx ? "NVSDK_NGX_D3D12_EvaluateFeature"
+                                    : "NVSDK_NGX_CUDA_EvaluateFeature"))
             return false;
         return finish_evaluation();
     }
 
-    g.params->Set(ngx_param::Color, resource_handle(g.color));
-    g.params->Set(ngx_param::Depth, resource_handle(g.depth));
-    g.params->Set(ngx_param::MotionVectors, resource_handle(g.motion));
-    g.params->Set(ngx_param::Output, resource_handle(g.output));
+    set_image_param(ngx_param::Color, g.color);
+    set_image_param(ngx_param::Depth, g.depth);
+    set_image_param(ngx_param::MotionVectors, g.motion);
+    set_image_param(ngx_param::Output, g.output);
 
     g.params->Set(ngx_param::JitterOffsetX, frame.jitter_x);
     g.params->Set(ngx_param::JitterOffsetY, frame.jitter_y);
@@ -1257,7 +1805,11 @@ static bool evaluate_ngx(const FrameDesc &frame) {
     // after the evaluation reports was actually produced by the evaluation.
     if (!cu_ok(g.cu.cuCtxSynchronize(), "cuCtxSynchronize (before evaluation)"))
         return false;
-    if (!ngx_ok(g.ngx_evaluate(g.feature, g.params), "NVSDK_NGX_CUDA_EvaluateFeature"))
+    open_cmd_if_native();
+    const NVSDK_NGX_Result r2 = g.ngx_evaluate(g.feature, g.params);
+    submit_and_wait_if_native();
+    if (!ngx_ok(r2, g.native_ngx ? "NVSDK_NGX_D3D12_EvaluateFeature"
+                                 : "NVSDK_NGX_CUDA_EvaluateFeature"))
         return false;
 
     return finish_evaluation();

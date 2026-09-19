@@ -49,6 +49,11 @@ struct InitDesc {
     // the one that matters, and it exists only because our NVAPI stand-in
     // invites a second user of the snippet into the process.
     bool nvidia_driver = false;
+    // Whether to go through NVIDIA's own NGX core -- the driver's _nvngx.dll --
+    // instead of driving the snippet directly, on a machine that has one.
+    //
+    // The core route is kept behind DLSS_NGX_CORE=driver, for comparison only.
+    bool driver_ngx_core = false;
     // NGX logging verbosity: 0 off, 1 on, 2 verbose. Worth leaving on, because
     // the snippet reports fatal errors to its log and then terminates the whole
     // process instead of returning a result.
