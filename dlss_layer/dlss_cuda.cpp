@@ -251,6 +251,13 @@ const char *snippet_signature_state(const wchar_t *path) {
     case TRUST_E_EXPLICIT_DISTRUST:
     case CRYPT_E_SECURITY_SETTINGS:
         return "distrusted";
+    // Not a verdict on the signature: the file could not be read at all.
+    // Measured: a path that does not exist, and a file another process holds
+    // open without sharing it, both come back as this -- while a patched copy
+    // that can be read says "hash mismatch". Saying "unverifiable" here sent a
+    // tester's report looking at signatures when the file was never opened.
+    case CRYPT_E_FILE_ERROR:
+        return "unreadable";
     default:
         return "unverifiable";
     }
@@ -266,7 +273,12 @@ void report_snippet_signature(const wchar_t *path, bool nvidia_driver) {
     if (g_reshade_log) g_reshade_log(line);
     if (strcmp(state, "valid") == 0) return;
 
-    if (nvidia_driver) {
+    if (strcmp(state, "unreadable") == 0) {
+        snprintf(line, sizeof line,
+                 "[dlss-cuda] the snippet file could not be opened for reading: it is not at that "
+                 "path, or another program has it open (a copy still in progress, an antivirus "
+                 "scan, a cloud sync). Loading it will fail the same way.\n");
+    } else if (nvidia_driver) {
         snprintf(line, sizeof line,
                  "[dlss-cuda] on a real NVIDIA driver NGX would normally refuse to build a "
                  "feature from this snippet with 0xBAD00002, since its signature no longer "

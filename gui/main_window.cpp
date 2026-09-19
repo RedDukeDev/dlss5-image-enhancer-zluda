@@ -100,7 +100,10 @@ QDoubleSpinBox *strength_row(QFormLayout *form, const QString &label, double val
     return box;
 }
 
-std::wstring to_wide(const QString &text) { return text.toStdWString(); }
+// Native separators: Qt's file dialog answers with forward slashes, and those
+// travel on into LoadLibrary, which documents backslashes as the only separator
+// it supports.
+std::wstring to_wide(const QString &text) { return QDir::toNativeSeparators(text).toStdWString(); }
 
 } // namespace
 

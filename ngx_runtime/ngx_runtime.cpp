@@ -230,14 +230,75 @@ extern "C" {
 // first missing export, or nullptr on success.
 __declspec(dllexport) const char *ngxrt_load(const wchar_t *snippet_path) {
     if (g_snippet) return nullptr;
-    g_snippet = LoadLibraryW(snippet_path ? snippet_path : L"nvngx_dlss.dll");
+    // Backslashes only. The GUI hands over what Qt's file dialog produced,
+    // which uses forward slashes, and the loader documents backslashes as the
+    // only separator it supports -- with LOAD_WITH_ALTERED_SEARCH_PATH forward
+    // slashes are explicitly undefined behaviour.
+    static wchar_t normalised[MAX_PATH * 4];
+    wcsncpy_s(normalised, snippet_path ? snippet_path : L"nvngx_dlss.dll", _TRUNCATE);
+    for (wchar_t *c = normalised; *c; ++c)
+        if (*c == L'/') *c = L'\\';
+    const wchar_t *path = normalised;
+    // With a full path, resolve the snippet's own imports from its directory
+    // rather than from the executable's. A plain LoadLibraryW searches beside
+    // the program, so a snippet that brings a dependency along in its own
+    // folder fails with "module not found" -- naming the snippet, which is
+    // there, and not the file that is missing.
+    const bool full_path = wcschr(path, L'\\') != nullptr;
+    g_snippet = full_path ? LoadLibraryExW(path, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)
+                          : LoadLibraryW(path);
     if (!g_snippet) {
-        // Name the file that was actually asked for. Reporting a fixed name
-        // sends the reader looking for the wrong file, which is worse than
-        // saying nothing.
-        static char asked[512];
-        WideCharToMultiByte(CP_UTF8, 0, snippet_path ? snippet_path : L"nvngx_dlss.dll", -1, asked,
-                            sizeof asked, nullptr, nullptr);
+        // Name the file that was actually asked for, and why Windows refused
+        // it. Without the error code a missing dependency, a damaged file, a
+        // snippet whose DllMain declined and a code-integrity refusal all read
+        // the same, and a tester's screenshot cannot tell them apart.
+        const DWORD error = GetLastError();
+        const char *why = "";
+        switch (error) {
+        case ERROR_MOD_NOT_FOUND:
+            // LoadLibraryExW answers 126 for the file itself being absent too,
+            // not only for a missing dependency -- measured: a path that does
+            // not exist comes back as 126, not 2. Only a look at the file
+            // separates the two.
+            why = GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES
+                      ? " -- the file does not exist at that path"
+                      : " -- the file is there, but a DLL it depends on was not found";
+            break;
+        case ERROR_BAD_EXE_FORMAT: why = " -- not a valid 64-bit DLL (damaged or wrong file)"; break;
+        case ERROR_DLL_INIT_FAILED: why = " -- the snippet's own initialisation refused to load"; break;
+        // A patched snippet no longer carries a valid signature. On a stock
+        // Windows machine that loads fine -- measured, from a path with spaces
+        // and forward slashes alike -- but Windows 11 Smart App Control, a WDAC
+        // policy or an antivirus can refuse exactly that, and only on the
+        // machine where it is enabled. These are the codes that says so.
+        case ERROR_INVALID_IMAGE_HASH:
+        case 4551: // ERROR_SYSTEM_INTEGRITY_POLICY_VIOLATION
+            why = " -- blocked by a code integrity policy because its signature is not valid "
+                  "(a patched snippet; check Smart App Control / WDAC, or use the signed original)";
+            break;
+        case ERROR_ACCESS_DISABLED_BY_POLICY:
+            why = " -- blocked by a system policy (Smart App Control, WDAC or software restriction)";
+            break;
+        case ERROR_VIRUS_INFECTED:
+        case ERROR_VIRUS_DELETED:
+            why = " -- the antivirus blocked or removed it";
+            break;
+        case ERROR_ACCESS_DENIED: why = " -- access denied (antivirus or file permissions)"; break;
+        // Measured: while another process holds the file open for writing, or
+        // without sharing it, the load fails with this -- and the signature
+        // check just before it reports the file as unverifiable. A copy still
+        // in progress, an antivirus scan or a cloud sync all look like this.
+        case ERROR_SHARING_VIOLATION:
+            why = " -- another program has the file open (a copy still in progress, an antivirus "
+                  "scan or a cloud sync such as OneDrive); wait for it or move the file elsewhere";
+            break;
+        case ERROR_FILE_NOT_FOUND:
+        case ERROR_PATH_NOT_FOUND: why = " -- the file does not exist at that path"; break;
+        }
+        static char asked[768];
+        char name[512];
+        WideCharToMultiByte(CP_UTF8, 0, path, -1, name, sizeof name, nullptr, nullptr);
+        snprintf(asked, sizeof asked, "%s (Windows error %lu%s)", name, error, why);
         return asked;
     }
 
