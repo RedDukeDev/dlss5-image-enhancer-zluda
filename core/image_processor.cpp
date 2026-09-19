@@ -369,10 +369,29 @@ bool Processor::start(const Paths &paths, std::string &error,
         return path.empty() ? nullptr : path.c_str();
     };
 
+    // The exe's own directory, not "." -- NGX's per-step log, the one
+    // __NGX_LOG_LEVEL turns on and which names the file, line and function of
+    // every refusal, is written under this path, and "."
+    // is the process's current directory, which is only the exe's folder when
+    // launched by double-click. A shortcut with its own "Start in", or any
+    // other launch method, silently sends that log somewhere else -- twice
+    // now the log a user was asked for turned out to be from the wrong place
+    // (or missing) because of exactly this.
+    std::wstring exe_dir = L".";
+    {
+        wchar_t exe[MAX_PATH];
+        const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        if (n > 0 && n < MAX_PATH) {
+            std::wstring path(exe, n);
+            const size_t slash = path.find_last_of(L"/" L"\\");
+            if (slash != std::wstring::npos) exe_dir = path.substr(0, slash);
+        }
+    }
+
     dlss_cuda::InitDesc init{};
     init.device = s->device;
     init.queue = s->queue;
-    init.data_path = L".";
+    init.data_path = exe_dir.c_str();
     init.application_id = 0;
     init.dlss_dll_path = paths.snippet.c_str();
     init.nvcuda_dll_path = cuda_driver.c_str();
