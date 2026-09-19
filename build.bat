@@ -15,18 +15,12 @@ cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=%QT_DIR%
 if errorlevel 1 exit /b 1
 cmake --build build
 if errorlevel 1 exit /b 1
-REM Qt6::Sql is linked for one reason -- merging the per-translation module
-REM caches in core\precompile.cpp -- and that reason is SQLite. Left alone,
-REM windeployqt also ships the Oracle, ODBC, PostgreSQL, Firebird and Mimer
-REM drivers, none of which this program can reach: about 600 KB of database
-REM clients in a folder for enhancing images.
-REM
-REM The directory is cleared first because windeployqt only ever adds: a plugin
-REM it deployed before an exclusion was added stays where it is, and the mirror
-REM below would then carry it into dist faithfully. Deleting it here is what
-REM makes the exclusion mean anything on a tree that has already been built.
+REM A build from when this program linked Qt6::Sql leaves its DLL and its SQL
+REM driver plugins in build\, and windeployqt only ever adds, never removes: the
+REM mirror below would carry them into dist\ for good. Nothing links them now.
 if exist "build\sqldrivers" rmdir /s /q "build\sqldrivers"
-"%QT_DIR%\bin\windeployqt.exe" --release --no-translations --no-opengl-sw --no-system-dxc-compiler --no-network --no-svg --exclude-plugins qsqlibase,qsqlmimer,qsqloci,qsqlodbc,qsqlpsql build\dlss5-image-enhancer.exe
+if exist "build\Qt6Sql.dll" del /q "build\Qt6Sql.dll"
+"%QT_DIR%\bin\windeployqt.exe" --release --no-translations --no-opengl-sw --no-system-dxc-compiler --no-network --no-svg build\dlss5-image-enhancer.exe
 if errorlevel 1 exit /b 1
 
 REM A clean copy of just what running the program needs, separate from

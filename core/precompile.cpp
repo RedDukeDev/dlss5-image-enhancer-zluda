@@ -4,11 +4,6 @@
 #include <windows.h>
 #include <psapi.h>
 
-#include <QtCore/QFile>
-#include <QtSql/QSqlDatabase>
-#include <QtSql/QSqlError>
-#include <QtSql/QSqlQuery>
-
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -36,6 +31,14 @@ constexpr unsigned long long kHeadroomMb = 2600;
 
 // What to leave for everything else. Someone may well be using the machine.
 constexpr unsigned long long kReserveMb = 3000;
+
+// How long a child has to run before it is taken to have translated its module
+// and written it to the cache, rather than found it there. A module already
+// cached comes back in a second or two -- load the driver, look the module up,
+// load its code object -- while the modules that matter take minutes to
+// translate. A small module that translates faster than this is not checked
+// again; if its row were lost, translating it on demand later costs seconds.
+constexpr ULONGLONG kTranslatedAfterMs = 10000;
 
 unsigned long long free_physical_mb() {
     MEMORYSTATUSEX status{};
@@ -91,35 +94,7 @@ std::wstring temporary_directory() {
     return directory;
 }
 
-// CreateDirectory refuses a path whose parent does not exist yet, so each
-// component is made in turn. An existing directory is not an error here.
-void make_directories(const std::wstring &path) {
-    for (size_t at = path.find(L'\\', 3); at != std::wstring::npos;
-         at = path.find(L'\\', at + 1))
-        CreateDirectoryW(path.substr(0, at).c_str(), nullptr);
-    CreateDirectoryW(path.c_str(), nullptr);
-}
-
-void remove_tree(const std::wstring &path) {
-    // Doubly terminated, which is what SHFileOperation's predecessor in this
-    // role expects; the loop below is simpler and has no such requirement.
-    WIN32_FIND_DATAW entry{};
-    const HANDLE search = FindFirstFileW((path + L"\\*").c_str(), &entry);
-    if (search == INVALID_HANDLE_VALUE) return;
-    do {
-        const std::wstring name = entry.cFileName;
-        if (name == L"." || name == L"..") continue;
-        const std::wstring child = path + L"\\" + name;
-        if (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-            remove_tree(child);
-        else
-            DeleteFileW(child.c_str());
-    } while (FindNextFileW(search, &entry));
-    FindClose(search);
-    RemoveDirectoryW(path.c_str());
-}
-
-// Where the translations have to end up, resolved the same way
+// The cache the translations have to land in, resolved the same way
 // image_processor.cpp resolves it before handing the network to ZLUDA: the
 // environment when it says, otherwise the cache shipped beside the program.
 // The two must agree, or this would fill a cache nothing ever reads.
@@ -133,97 +108,19 @@ std::wstring cache_directory() {
     return path + L"zluda\\ComputeCache";
 }
 
-// How many modules a cache database holds; -1 if it cannot be read at all.
-int rows_in(const QString &database) {
-    if (!QFile::exists(database)) return 0;
-    int held = -1;
-    {
-        QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"),
-                                                    QStringLiteral("count"));
-        db.setDatabaseName(database);
-        if (db.open()) {
-            QSqlQuery query(db);
-            if (query.exec(QStringLiteral("SELECT COUNT(*) FROM modules")) && query.next())
-                held = query.value(0).toInt();
-            db.close();
-        }
-    }
-    QSqlDatabase::removeDatabase(QStringLiteral("count"));
-    return held;
-}
-
-// Puts the per-translation databases into the cache the program will read.
-//
-// Unlike the tools that build a release cache, this cannot start from a copy of
-// the first shard: the destination may already hold something -- the cache
-// shipped with the program, or what an earlier run left -- and copying over it
-// would throw that away. So a missing destination is seeded from one shard, and
-// an existing one is inserted into.
-//
-// The merge is exact rather than approximate because the schema carries a
-// unique index on (hash, compiler_version, zluda_version, device, backend_key):
-// a module already present collapses to one row instead of doubling.
-bool merge_shards(const std::wstring &destination, const std::vector<std::wstring> &shards,
-                  std::string &error) {
-    const QString target = QString::fromStdWString(destination + L"\\zluda2.db");
-    std::vector<QString> sources;
-    for (const std::wstring &shard : shards) {
-        const QString path = QString::fromStdWString(shard + L"\\zluda2.db");
-        if (QFile::exists(path)) sources.push_back(path);
-    }
-    if (sources.empty()) {
-        error = "no translation produced a cache database";
-        return false;
-    }
-
-    size_t first = 0;
-    if (!QFile::exists(target)) {
-        // Seeded from a shard rather than from a CREATE TABLE written here, so
-        // the schema is ZLUDA's own -- indexes and the triggers that maintain
-        // globals.total_size included -- instead of a second copy of it that
-        // would have to be kept in step with ZLUDA by hand.
-        if (!QFile::copy(sources[0], target)) {
-            error = "the module cache could not be created beside the program";
-            return false;
-        }
-        first = 1;
-    }
-
-    bool ok = true;
-    {
-        QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"),
-                                                    QStringLiteral("merge"));
-        db.setDatabaseName(target);
-        if (!db.open()) {
-            error = "the module cache could not be opened: " +
-                    db.lastError().text().toStdString();
-            QSqlDatabase::removeDatabase(QStringLiteral("merge"));
-            return false;
-        }
-        QSqlQuery query(db);
-        for (size_t i = first; i < sources.size() && ok; ++i) {
-            query.prepare(QStringLiteral("ATTACH DATABASE ? AS shard"));
-            query.addBindValue(sources[i]);
-            if (!query.exec()) {
-                error = "a translation could not be read back: " +
-                        query.lastError().text().toStdString();
-                ok = false;
-                break;
-            }
-            ok = query.exec(QStringLiteral(
-                "INSERT OR IGNORE INTO modules "
-                "(hash, compiler_version, zluda_version, device, backend_key, binary, "
-                "last_access) SELECT hash, compiler_version, zluda_version, device, "
-                "backend_key, binary, last_access FROM shard.modules"));
-            if (!ok)
-                error = "a translation could not be merged: " +
-                        query.lastError().text().toStdString();
-            query.exec(QStringLiteral("DETACH DATABASE shard"));
-        }
-        db.close();
-    }
-    QSqlDatabase::removeDatabase(QStringLiteral("merge"));
-    return ok;
+// One module, translated by a copy of this program. Null if it would not start.
+HANDLE start_compile_one(const std::wstring &self, const std::wstring &module_file,
+                         const std::wstring &driver) {
+    std::wstring command =
+        L"\"" + self + L"\" --compile-one \"" + module_file + L"\" \"" + driver + L"\"";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof startup;
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                        nullptr, nullptr, &startup, &process))
+        return nullptr;
+    CloseHandle(process.hThread);
+    return process.hProcess;
 }
 
 } // namespace
@@ -336,8 +233,7 @@ bool precompile(const std::wstring &library, const std::wstring &driver, unsigne
     // Largest first: the long poles then start immediately instead of being
     // picked up last, which is the difference between finishing in one wave and
     // waiting on a single straggler.
-    std::sort(files.begin(), files.end(), [&modules, &files](const std::wstring &a,
-                                                             const std::wstring &b) {
+    std::sort(files.begin(), files.end(), [](const std::wstring &a, const std::wstring &b) {
         auto size_of = [](const std::wstring &path) -> unsigned long long {
             WIN32_FILE_ATTRIBUTE_DATA data{};
             if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) return 0;
@@ -346,66 +242,44 @@ bool precompile(const std::wstring &library, const std::wstring &driver, unsigne
         return size_of(a) > size_of(b);
     });
 
-    // One cache database per translation, merged when they are all done.
+    // The children translate into the cache the program itself will read, so a
+    // module already there -- shipped with the program, or left by an earlier
+    // run -- is found in a second instead of translated again for minutes. That
+    // is the ordinary case: most starts find every module cached.
     //
-    // Several processes writing one zluda2.db can lose rows and report nothing:
-    // filling a cache with four large modules in flight produced 12 and then 14
-    // rows out of 15 across two identical runs, with a 30-second busy timeout
-    // and WAL already in place. A database with a single writer cannot race, and
-    // it also makes a loss visible -- a shard must hold exactly one module, so a
-    // hole is named here instead of being discovered later as an unexplained
-    // pause while that one module is translated again.
-    const std::wstring destination = cache_directory();
-    const std::wstring shard_base = destination + L"\\.shards";
-    make_directories(destination);
-    make_directories(shard_base);
+    // Several processes writing one cache database can lose rows without a
+    // word: filling a cache with four large modules in flight produced 12 and
+    // then 14 rows out of 15 across two identical runs, with a busy timeout and
+    // WAL already in place. That is dealt with below, after the fact, rather
+    // than by giving each child a database of its own: a child with a cache of
+    // its own cannot see the one that already holds its module, and would
+    // translate everything on every start.
     wchar_t previous_cache[MAX_PATH] = {};
     const bool had_cache_variable =
         GetEnvironmentVariableW(L"ZLUDA_CACHE_DIR", previous_cache, MAX_PATH) > 0;
+    SetEnvironmentVariableW(L"ZLUDA_CACHE_DIR", cache_directory().c_str());
 
     const std::wstring self = own_path();
     std::vector<HANDLE> running;
-    std::vector<std::wstring> shards(files.size());
-    std::vector<size_t> shard_of_running;
+    std::vector<size_t> running_module;
+    std::vector<ULONGLONG> running_since;
+    std::vector<size_t> translated;
     size_t next = 0;
     int failures = 0;
 
     while (next < files.size() || !running.empty()) {
         while (next < files.size() && running.size() < ceiling &&
                (!adaptive || room_for_another(running))) {
-            wchar_t shard[MAX_PATH];
-            swprintf(shard, MAX_PATH, L"%s\\unit_%03zu", shard_base.c_str(), next);
-            shards[next] = shard;
-            make_directories(shards[next]);
-            // The child inherits the environment as it stands when it is
-            // created, so setting this here is what gives each translation a
-            // database nobody else writes to.
-            SetEnvironmentVariableW(L"ZLUDA_CACHE_DIR", shard);
-
-            std::wstring command = L"\"" + self + L"\" --compile-one \"" + files[next] + L"\" \"" +
-                                   driver + L"\"";
-            STARTUPINFOW startup{};
-            startup.cb = sizeof startup;
-            PROCESS_INFORMATION process{};
-            if (CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
-                               nullptr, nullptr, &startup, &process)) {
-                CloseHandle(process.hThread);
-                running.push_back(process.hProcess);
-                shard_of_running.push_back(next);
+            if (HANDLE process = start_compile_one(self, files[next], driver)) {
+                running.push_back(process);
+                running_module.push_back(next);
+                running_since.push_back(GetTickCount64());
             } else {
                 ++failures;
                 ++progress.done;
-                shards[next].clear();
             }
             ++next;
         }
-        // Put it back straight away, so nothing else in this process inherits a
-        // shard as its cache.
-        if (had_cache_variable)
-            SetEnvironmentVariableW(L"ZLUDA_CACHE_DIR", previous_cache);
-        else
-            SetEnvironmentVariableW(L"ZLUDA_CACHE_DIR", nullptr);
-
         if (running.empty()) break;
 
         const DWORD which = WaitForMultipleObjects((DWORD)running.size(), running.data(), FALSE,
@@ -414,32 +288,24 @@ bool precompile(const std::wstring &library, const std::wstring &driver, unsigne
         if (index >= running.size()) break;
         DWORD code = 1;
         GetExitCodeProcess(running[index], &code);
-        const size_t module_index = shard_of_running[index];
+        const size_t module_index = running_module[index];
+        const ULONGLONG took = GetTickCount64() - running_since[index];
         CloseHandle(running[index]);
         running.erase(running.begin() + index);
-        shard_of_running.erase(shard_of_running.begin() + index);
+        running_module.erase(running_module.begin() + index);
+        running_since.erase(running_since.begin() + index);
 
-        bool landed = code == 0;
         std::string why;
-        if (landed) {
-            // Exactly one module, or the translation reported a success it did
-            // not deliver.
-            const int held = rows_in(QString::fromStdWString(shards[module_index] +
-                                                             L"\\zluda2.db"));
-            landed = held == 1;
-            if (!landed) {
-                shards[module_index].clear();
-                why = "translated, but its cache holds " + std::to_string(held) + " rows";
-            }
-        } else {
-            shards[module_index].clear();
+        if (code != 0) {
+            ++failures;
             // The code itself, because an access violation and a refusal from
             // the driver call for different things and "failed" says neither.
             char hex[48];
             snprintf(hex, sizeof hex, "exit code 0x%08lX", code);
             why = hex;
+        } else if (took >= kTranslatedAfterMs) {
+            translated.push_back(module_index);
         }
-        if (!landed) ++failures;
 
         ++progress.done;
         {
@@ -452,30 +318,42 @@ bool precompile(const std::wstring &library, const std::wstring &driver, unsigne
         report(progress);
     }
 
+    // What the parallel pass wrote, it may have lost. Each module that was
+    // actually translated rather than found is loaded once more, alone: one
+    // whose row survived is found in a second, and one whose row was lost is
+    // translated again -- this time with nobody else writing. On a start that
+    // found everything cached there is nothing to check and this costs nothing.
+    if (!translated.empty()) {
+        char buffer[160];
+        snprintf(buffer, sizeof buffer, "checking %zu translated modules one at a time",
+                 translated.size());
+        progress.message = buffer;
+        report(progress);
+        for (size_t module_index : translated) {
+            HANDLE process = start_compile_one(self, files[module_index], driver);
+            if (!process) {
+                ++failures;
+                continue;
+            }
+            WaitForSingleObject(process, INFINITE);
+            DWORD code = 1;
+            GetExitCodeProcess(process, &code);
+            CloseHandle(process);
+            if (code != 0) ++failures;
+        }
+    }
+
+    if (had_cache_variable)
+        SetEnvironmentVariableW(L"ZLUDA_CACHE_DIR", previous_cache);
+    else
+        SetEnvironmentVariableW(L"ZLUDA_CACHE_DIR", nullptr);
+
     for (const std::wstring &path : files) DeleteFileW(path.c_str());
     RemoveDirectoryW(directory.c_str());
-
-    std::vector<std::wstring> landed;
-    for (const std::wstring &shard : shards)
-        if (!shard.empty()) landed.push_back(shard);
-
-    bool merged = false;
-    if (!landed.empty()) {
-        progress.message = "merging " + std::to_string(landed.size()) + " translations";
-        report(progress);
-        merged = merge_shards(destination, landed, error);
-    }
-    // Kept when the merge fails: they are then the only copy of work that took
-    // minutes per module.
-    if (merged) remove_tree(shard_base);
 
     if (failures) {
         error = std::to_string(failures) + " of " + std::to_string(progress.total) +
                 " modules could not be translated";
-        return false;
-    }
-    if (!merged) {
-        if (error.empty()) error = "the translations could not be merged into the cache";
         return false;
     }
     return true;

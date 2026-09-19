@@ -15,13 +15,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
-# Sql is here for one job: precompile.cpp gives every translation a cache
-# database of its own and merges them when they are done, because several
-# processes writing one of them can lose rows and say nothing. Merging SQLite
-# properly means talking to SQLite, and Qt already carries it -- windeployqt
-# brings sqldrivers\qsqlite.dll along the way it already brings the platform and
-# image plugins, so nothing in build.bat has to change.
-find_package(Qt6 REQUIRED COMPONENTS Widgets Sql)
+find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
 add_executable(dlss5-image-enhancer WIN32
     gui/main.cpp
@@ -37,7 +31,7 @@ add_executable(dlss5-image-enhancer WIN32
 )
 
 target_include_directories(dlss5-image-enhancer PRIVATE dlss_layer)
-target_link_libraries(dlss5-image-enhancer PRIVATE Qt6::Widgets Qt6::Sql d3d12 dxgi d3dcompiler)
+target_link_libraries(dlss5-image-enhancer PRIVATE Qt6::Widgets d3d12 dxgi d3dcompiler)
 
 # A console alongside the window: the DLSS layer and the network both report
 # through standard error, and those messages are the only explanation when
