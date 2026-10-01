@@ -95,8 +95,12 @@ QDoubleSpinBox *strength_row(QFormLayout *form, const QString &label, double val
     box->setSingleStep(0.05);
     box->setDecimals(2);
     box->setValue(value);
-    if (!tip.isEmpty()) box->setToolTip(tip);
     form->addRow(label, box);
+    // On the label too: the text is as much the thing pointed at as the box.
+    if (!tip.isEmpty()) {
+        box->setToolTip(tip);
+        if (QWidget *name = form->labelForField(box)) name->setToolTip(tip);
+    }
     return box;
 }
 
@@ -254,37 +258,73 @@ QWidget *MainWindow::build_controls() {
     auto *network = new QGroupBox(tr("Network"));
     auto *form = new QFormLayout(network);
 
-    intensity_ = strength_row(form, tr("Overall Intensity"), 1.0, {}, panel);
-    local_tone_ = strength_row(form, tr("Local Tone Intensity"), 1.0, {}, panel);
-    local_structure_ = strength_row(form, tr("Structure Intensity"), 1.0, {}, panel);
+    intensity_ = strength_row(
+        form, tr("Overall Intensity"), 1.0,
+        tr("How strongly the effect is applied. 1 is full strength, 0 is none.\n\n"
+           "Below 1 the picture can also come out darker: raise Passes to bring "
+           "the brightness back."),
+        panel);
+    // The network takes no more than 1: a larger value is read as 1.
+    intensity_->setMaximum(1.0);
+    local_tone_ = strength_row(
+        form, tr("Local Tone Intensity"), 1.0,
+        tr("Changes the lighting and contrast of each area of the picture.\n\n"
+           "1 is the normal amount. Lower values soften it, higher values push "
+           "it further."),
+        panel);
+    local_structure_ = strength_row(
+        form, tr("Structure Intensity"), 1.0,
+        tr("Adds fine detail and texture to surfaces, fabric and foliage.\n\n"
+           "1 is the normal amount. Lower values soften it, higher values push "
+           "it further."),
+        panel);
     // The network's own default for the skin is "automatic": it follows the
-    // structure strength. The box says so, and the slider takes over when it is
-    // unticked.
-    skin_structure_ = strength_row(
-        form, tr("Character / Skin Structure"), 1.0,
-        tr("The detail added to faces and skin. Works through the automatic mask."), panel);
+    // structure strength. The box comes first and says so; the number below
+    // takes over when it is unticked.
     skin_auto_ = new QCheckBox(tr("Automatic (follows Structure Intensity)"), panel);
     skin_auto_->setChecked(true);
+    const QString skin_tip =
+        tr("How much detail is added to faces and skin.\n\n"
+           "Tick Automatic to use the same amount as Structure Intensity, or "
+           "untick it and choose your own value below.\n\n"
+           "It needs Automatic mask to be on.");
+    skin_auto_->setToolTip(skin_tip);
+    form->addRow(tr("Character / Skin Structure"), skin_auto_);
+    if (QWidget *name = form->labelForField(skin_auto_)) name->setToolTip(skin_tip);
+    skin_structure_ = strength_row(form, QString(), 1.0, skin_tip, panel);
     skin_structure_->setEnabled(false);
     connect(skin_auto_, &QCheckBox::toggled, skin_structure_,
             [this](bool automatic) { skin_structure_->setEnabled(!automatic); });
-    form->addRow(QString(), skin_auto_);
 
     style_ = new QComboBox(panel);
     style_->addItems({tr("Default"), tr("Natural"), tr("Cinematic")});
+    const QString style_tip =
+        tr("Gives the picture a different look.\n\n"
+           "Default leaves the look as it is. Natural and Cinematic each change "
+           "the tones in their own way.");
+    style_->setToolTip(style_tip);
     form->addRow(tr("NR Style"), style_);
+    if (QWidget *name = form->labelForField(style_)) name->setToolTip(style_tip);
 
     auto_mask_ = new QCheckBox(tr("Automatic mask"), panel);
     auto_mask_->setChecked(true);
+    auto_mask_->setToolTip(
+        tr("Lets the program find faces and skin by itself.\n\n"
+           "If you turn it off, the skin setting stops working."));
     form->addRow(QString(), auto_mask_);
 
     passes_ = new QSpinBox(panel);
     passes_->setRange(1, 16);
     passes_->setValue(1);
-    passes_->setToolTip(tr("The network blends with its own previous result, which starts "
-                           "black. Repeating on a still picture is the nearest thing to a "
-                           "scene standing still, and lets the blend settle."));
+    const QString passes_tip =
+        tr("How many times the effect is run on your picture before the result "
+           "is kept.\n\n"
+           "At Overall Intensity 1 one pass is enough. If you lowered the "
+           "intensity, use more passes to keep the picture from getting darker.\n\n"
+           "Each pass takes as long as the first.");
+    passes_->setToolTip(passes_tip);
     form->addRow(tr("Passes"), passes_);
+    if (QWidget *name = form->labelForField(passes_)) name->setToolTip(passes_tip);
 
     layout->addWidget(network);
 
