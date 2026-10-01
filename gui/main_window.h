@@ -112,12 +112,11 @@ private:
     // QFormLayout::labelForField needs to reach the row's other half.
 
     QDoubleSpinBox *intensity_ = nullptr;
-    QDoubleSpinBox *global_tone_ = nullptr;
     QDoubleSpinBox *local_tone_ = nullptr;
     QDoubleSpinBox *local_structure_ = nullptr;
     QDoubleSpinBox *skin_structure_ = nullptr;
+    QCheckBox *skin_auto_ = nullptr;
     QComboBox *style_ = nullptr;
-    QComboBox *preset_ = nullptr;
     QCheckBox *auto_mask_ = nullptr;
     QSpinBox *passes_ = nullptr;
 

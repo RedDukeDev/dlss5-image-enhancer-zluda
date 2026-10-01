@@ -220,7 +220,6 @@ inline constexpr const char *Upscaling = "DLSSNR.Upscaling";
 // The network reads this name, not "DLSSNR.Scale": the trace shows
 // ScalingRatio queried and the other spelling never asked for.
 inline constexpr const char *ScalingRatio = "DLSSNR.ScalingRatio";
-inline constexpr const char *RenderPreset = "DLSSNR.Hint.Render.Preset";
 
 inline constexpr const char *Color = "DLSSNR.Color";
 inline constexpr const char *Depth = "DLSSNR.Depth";
@@ -239,7 +238,6 @@ inline constexpr const char *Backbuffer = "DLSSNR.Backbuffer";
 // upscaler.
 inline constexpr const char *Style = "DLSSNR.Style";
 inline constexpr const char *Intensity = "DLSSNR.Intensity";
-inline constexpr const char *GlobalToneStrength = "DLSSNR.GlobalToneStrength";
 inline constexpr const char *LocalToneStrength = "DLSSNR.LocalToneStrength";
 inline constexpr const char *LocalStructureStrength = "DLSSNR.LocalStructureStrength";
 inline constexpr const char *SkinStructureStrength = "DLSSNR.SkinStructureStrength";

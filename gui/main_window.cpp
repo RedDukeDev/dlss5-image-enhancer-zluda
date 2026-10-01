@@ -255,26 +255,24 @@ QWidget *MainWindow::build_controls() {
     auto *form = new QFormLayout(network);
 
     intensity_ = strength_row(form, tr("Overall Intensity"), 1.0, {}, panel);
-    global_tone_ = strength_row(
-        form, tr("Global Tone Intensity"), 0.0,
-        tr("Left at zero. A single run with it at one flattened the picture, but the "
-           "evaluation is not reproducible, so that reading cannot be trusted."),
-        panel);
     local_tone_ = strength_row(form, tr("Local Tone Intensity"), 1.0, {}, panel);
     local_structure_ = strength_row(form, tr("Structure Intensity"), 1.0, {}, panel);
+    // The network's own default for the skin is "automatic": it follows the
+    // structure strength. The box says so, and the slider takes over when it is
+    // unticked.
     skin_structure_ = strength_row(
-        form, tr("Character / Skin Structure"), 0.0,
-        tr("Left at zero for the same reason as Global Tone above."), panel);
+        form, tr("Character / Skin Structure"), 1.0,
+        tr("The detail added to faces and skin. Works through the automatic mask."), panel);
+    skin_auto_ = new QCheckBox(tr("Automatic (follows Structure Intensity)"), panel);
+    skin_auto_->setChecked(true);
+    skin_structure_->setEnabled(false);
+    connect(skin_auto_, &QCheckBox::toggled, skin_structure_,
+            [this](bool automatic) { skin_structure_->setEnabled(!automatic); });
+    form->addRow(QString(), skin_auto_);
 
     style_ = new QComboBox(panel);
     style_->addItems({tr("Default"), tr("Natural"), tr("Cinematic")});
     form->addRow(tr("NR Style"), style_);
-
-    preset_ = new QComboBox(panel);
-    preset_->addItems({tr("Default"), tr("Preset #1"), tr("Preset #2"), tr("Preset #3")});
-    preset_->setToolTip(tr("Which trained weights to use. The network falls back to its "
-                           "shipping default when the preset asked for is not in the build."));
-    form->addRow(tr("NR Preset"), preset_);
 
     auto_mask_ = new QCheckBox(tr("Automatic mask"), panel);
     auto_mask_->setChecked(true);
@@ -446,12 +444,11 @@ void MainWindow::remember_paths() const {
 Settings MainWindow::current_settings() const {
     Settings settings;
     settings.intensity = (float)intensity_->value();
-    settings.global_tone = (float)global_tone_->value();
     settings.local_tone = (float)local_tone_->value();
     settings.local_structure = (float)local_structure_->value();
-    settings.skin_structure = (float)skin_structure_->value();
+    // -1 is the network's "automatic": it follows the structure strength.
+    settings.skin_structure = skin_auto_->isChecked() ? -1.0f : (float)skin_structure_->value();
     settings.style = style_->currentIndex();
-    settings.preset = preset_->currentIndex();
     settings.auto_mask = auto_mask_->isChecked();
     settings.passes = passes_->value();
     return settings;

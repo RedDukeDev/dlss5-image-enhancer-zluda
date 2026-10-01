@@ -19,18 +19,14 @@ namespace enhancer {
 
 // The controls, with the values the addon starts from.
 //
-// Global tone and skin structure start at zero. A single run with each at one
-// produced a flattened picture, but the evaluation is not reproducible -- the
-// same settings give a good frame or a flat one -- so that reading is not
-// trustworthy and zero is the cautious choice rather than a measured one.
+// Skin structure starts at -1, which is the network's own "automatic": it
+// follows the structure strength. Any value from zero up is taken as it is.
 struct Settings {
     float intensity = 1.0f;
-    float global_tone = 0.0f;
     float local_tone = 1.0f;
     float local_structure = 1.0f;
-    float skin_structure = 0.0f;
+    float skin_structure = -1.0f;
     int style = 0;   // 0 default, 1 natural, 2 cinematic
-    int preset = 0;  // 0 leaves the choice to the network
     bool auto_mask = true;
     // Repeats the evaluation on the same picture. The network blends with its
     // own previous output, so for a still image this is the nearest thing to a

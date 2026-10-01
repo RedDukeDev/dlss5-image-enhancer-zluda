@@ -1448,8 +1448,6 @@ void set_create_params_nr(const FeatureDesc &desc) {
                   upscaling ? (float)desc.output_width / (float)desc.render_width : 1.0f);
     // Zero means "leave the snippet's own default", which is what it picks when
     // the hint is absent.
-    if (desc.neural.render_preset != 0)
-        g.params->Set(nr_param::RenderPreset, desc.neural.render_preset);
     g.params->Set(ngx_param::CreationNodeMask, 1u);
     g.params->Set(ngx_param::VisibilityNodeMask, 1u);
 }
@@ -1512,7 +1510,6 @@ void set_frame_params_nr(const FeatureDesc &create, const NeuralRenderingDesc &n
 
     g.params->Set(nr_param::Style, nr.style);
     g.params->Set(nr_param::Intensity, nr.intensity);
-    g.params->Set(nr_param::GlobalToneStrength, nr.global_tone_strength);
     g.params->Set(nr_param::LocalToneStrength, nr.local_tone_strength);
     g.params->Set(nr_param::LocalStructureStrength, nr.local_structure_strength);
     g.params->Set(nr_param::SkinStructureStrength, nr.skin_structure_strength);
@@ -1537,6 +1534,14 @@ void set_frame_params_nr(const FeatureDesc &create, const NeuralRenderingDesc &n
     g.params->Set("DLSS.Indicator.Invert.Y.Axis", 0);
 }
 
+static bool same_neural_controls(const NeuralRenderingDesc &a, const NeuralRenderingDesc &b) {
+    return a.style == b.style && a.intensity == b.intensity && a.local_tone_strength == b.local_tone_strength &&
+           a.local_structure_strength == b.local_structure_strength &&
+           a.skin_structure_strength == b.skin_structure_strength && a.ui_correction == b.ui_correction &&
+           a.use_auto_mask == b.use_auto_mask && a.depth_convention == b.depth_convention &&
+           a.mv_scale_multiplier_x == b.mv_scale_multiplier_x && a.mv_scale_multiplier_y == b.mv_scale_multiplier_y;
+}
+
 bool create_feature(const FeatureDesc &desc) {
     if (!g.initialized) {
         set_error("create_feature called before init");
@@ -1547,10 +1552,9 @@ bool create_feature(const FeatureDesc &desc) {
     // whatever internal workspace the snippet allocates for it -- that has
     // never been touched by a previous call in this same process.
     //
-    // Diagnostic, added to chase the non-determinism this project has never
-    // pinned down (two stable outcomes over repeated identical evaluations,
-    // see the note on global_tone_strength/skin_structure_strength in
-    // dlss_cuda.h): a run of the enhancer GUI reprocessing one already-loaded
+    // Diagnostic, added to chase a non-determinism since resolved (two stable
+    // outcomes over repeated identical evaluations): a run of the enhancer GUI
+    // reprocessing one already-loaded
     // image over and over always lands on the same outcome, good or flat,
     // and only loading a *different* image can change which one -- which
     // reuse of this cached feature makes possible, and this variable removes,
@@ -1560,11 +1564,18 @@ bool create_feature(const FeatureDesc &desc) {
         GetEnvironmentVariableA("DLSS_FORCE_RECREATE_FEATURE", force_recreate, sizeof force_recreate) >
             0 &&
         force_recreate[0] == '1';
-    if (!always_recreate && g.feature && desc.render_width == g.current.render_width &&
-        desc.render_height == g.current.render_height &&
-        desc.output_width == g.current.output_width &&
-        desc.output_height == g.current.output_height &&
-        desc.perf_quality == g.current.perf_quality && desc.create_flags == g.current.create_flags)
+    // The network's controls are part of what a feature was made with. Intensity
+    // in particular is only honoured when it is there at creation, and what
+    // is not recreated keeps answering with the controls of the first request:
+    // a slider moved after the first run did nothing. So a changed control asks
+    // for a new feature, the same as a changed size does.
+    const bool same_controls =
+        desc.feature != Feature::NeuralRendering || same_neural_controls(desc.neural, g.current.neural);
+    if (!always_recreate && g.feature && desc.feature == g.current.feature &&
+        desc.render_width == g.current.render_width && desc.render_height == g.current.render_height &&
+        desc.output_width == g.current.output_width && desc.output_height == g.current.output_height &&
+        desc.perf_quality == g.current.perf_quality && desc.create_flags == g.current.create_flags &&
+        same_controls)
         return true;
 
     if (g.feature) {

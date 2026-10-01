@@ -450,12 +450,10 @@ bool Processor::process(const Image &in, Image &out, const Settings &settings,
     feature.output_height = feature.render_height = in.height;
     feature.perf_quality = 2;
     feature.neural.intensity = settings.intensity;
-    feature.neural.global_tone_strength = settings.global_tone;
     feature.neural.local_tone_strength = settings.local_tone;
     feature.neural.local_structure_strength = settings.local_structure;
     feature.neural.skin_structure_strength = settings.skin_structure;
     feature.neural.style = settings.style;
-    feature.neural.render_preset = settings.preset;
     feature.neural.use_auto_mask = settings.auto_mask;
     if (!dlss_cuda::create_feature(feature)) {
         error = dlss_cuda::last_error();

@@ -74,32 +74,27 @@ enum class Feature {
 
 // The neural rendering controls. All of them are neutral at zero except
 // intensity; the snippet clamps out of range values itself.
+//
+// The snippet has no global tone control and no choice of preset: it never
+// reads DLSSNR.GlobalToneStrength, and the same network answers whatever
+// preset is asked for. Neither is offered.
 struct NeuralRenderingDesc {
     int32_t style = 0;
     float intensity = 1.0f;
-    // The five strengths the network takes. Ours all started at zero, which is
-    // why its effect was barely visible: it was being asked for none of it.
-    // Local tone and local structure at one give a clear, sane improvement.
-    //
-    // Global tone and skin structure are left at zero, but on weaker grounds
-    // than the others: single runs with each at one produced a flattened frame,
-    // and only afterwards did repeated runs show the evaluation itself is not
-    // reproducible -- the same parameters give a good frame or a flat one,
-    // measured five to three over eight identical runs. Those two readings were
-    // therefore single samples of a coin flip and prove nothing about the
-    // parameters. Zero is kept as the cautious choice until the race behind the
-    // non-determinism is fixed and the measurement can be repeated honestly.
-    float global_tone_strength = 0.0f;
+    // The strengths the network takes. Local tone and local structure at one
+    // give a clear, sane improvement.
     float local_tone_strength = 1.0f;
     float local_structure_strength = 1.0f;
-    float skin_structure_strength = 0.0f;
+    // The detail added to faces and skin, through the network's own character
+    // mask (use_auto_mask: with the mask off this does nothing). Negative, as
+    // the network's own default is, means automatic: it follows the structure
+    // strength.
+    float skin_structure_strength = -1.0f;
     // Leaves interface elements alone, which otherwise get altered along with
     // the rest of the frame.
     bool ui_correction = true;
     // Lets the network derive its own mask instead of taking one.
     bool use_auto_mask = true;
-    // Which trained network to use. Zero leaves the snippet's own default.
-    int32_t render_preset = 0;
 
     // Guide overrides. The network is told how the game's depth and motion
     // vectors are laid out; when the game's own convention is wrong or unknown,
