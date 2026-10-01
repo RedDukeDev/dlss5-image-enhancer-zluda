@@ -258,17 +258,17 @@ QWidget *MainWindow::build_controls() {
     local_tone_ = strength_row(form, tr("Local Tone Intensity"), 1.0, {}, panel);
     local_structure_ = strength_row(form, tr("Structure Intensity"), 1.0, {}, panel);
     // The network's own default for the skin is "automatic": it follows the
-    // structure strength. The box says so, and the slider takes over when it is
-    // unticked.
-    skin_structure_ = strength_row(
-        form, tr("Character / Skin Structure"), 1.0,
-        tr("The detail added to faces and skin. Works through the automatic mask."), panel);
+    // structure strength. The box comes first and says so; the number below
+    // takes over when it is unticked.
     skin_auto_ = new QCheckBox(tr("Automatic (follows Structure Intensity)"), panel);
     skin_auto_->setChecked(true);
+    form->addRow(tr("Character / Skin Structure"), skin_auto_);
+    skin_structure_ = strength_row(
+        form, QString(), 1.0,
+        tr("The detail added to faces and skin. Works through the automatic mask."), panel);
     skin_structure_->setEnabled(false);
     connect(skin_auto_, &QCheckBox::toggled, skin_structure_,
             [this](bool automatic) { skin_structure_->setEnabled(!automatic); });
-    form->addRow(QString(), skin_auto_);
 
     style_ = new QComboBox(panel);
     style_->addItems({tr("Default"), tr("Natural"), tr("Cinematic")});
