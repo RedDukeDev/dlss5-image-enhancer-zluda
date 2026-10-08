@@ -28,10 +28,13 @@ struct Settings {
     float skin_structure = -1.0f;
     int style = 0;   // 0 default, 1 natural, 2 cinematic
     bool auto_mask = true;
-    // Repeats the evaluation on the same picture. The network blends with its
-    // own previous output, so for a still image this is the nearest thing to a
-    // scene standing still.
+    // How many times the network runs. Each pass works on the result of the one
+    // before it, as if that were a new picture, so the effect builds up.
     int passes = 1;
+    // Whether the passes after the first keep the local tone. Left on, the tone
+    // is applied again on every pass and adds up; off, only the first pass
+    // applies it and the later ones leave the lighting as it came.
+    bool keep_local_tone = true;
 };
 
 // Where the pieces are. All of them belong to someone else; the program never

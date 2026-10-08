@@ -119,6 +119,7 @@ private:
     QComboBox *style_ = nullptr;
     QCheckBox *auto_mask_ = nullptr;
     QSpinBox *passes_ = nullptr;
+    QCheckBox *keep_tone_ = nullptr;
 
     Image input_;
     Image output_;

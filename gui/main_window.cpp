@@ -317,14 +317,28 @@ QWidget *MainWindow::build_controls() {
     passes_->setRange(1, 16);
     passes_->setValue(1);
     const QString passes_tip =
-        tr("How many times the effect is run on your picture before the result "
-           "is kept.\n\n"
-           "At Overall Intensity 1 one pass is enough. If you lowered the "
-           "intensity, use more passes to keep the picture from getting darker.\n\n"
-           "Each pass takes as long as the first.");
+        tr("How many times the effect is applied, one on top of the other: each "
+           "pass works on the result of the one before.\n\n"
+           "More passes give a stronger effect, but too many make the picture look "
+           "artificial. Each pass takes as long as the first.");
     passes_->setToolTip(passes_tip);
-    form->addRow(tr("Passes"), passes_);
-    if (QWidget *name = form->labelForField(passes_)) name->setToolTip(passes_tip);
+    keep_tone_ = new QCheckBox(tr("Keep local tone"), panel);
+    keep_tone_->setChecked(true);
+    keep_tone_->setEnabled(false);
+    keep_tone_->setToolTip(
+        tr("Applies Local Tone Intensity on every pass.\n\n"
+           "Because the passes stack, the lighting is pushed further each time. "
+           "Untick it to apply the local tone only on the first pass."));
+    connect(passes_, qOverload<int>(&QSpinBox::valueChanged), keep_tone_,
+            [this](int passes) { keep_tone_->setEnabled(passes > 1); });
+    auto *passes_row = new QWidget(panel);
+    auto *passes_layout = new QHBoxLayout(passes_row);
+    passes_layout->setContentsMargins(0, 0, 0, 0);
+    passes_layout->addWidget(passes_);
+    passes_layout->addWidget(keep_tone_);
+    passes_layout->addStretch(1);
+    form->addRow(tr("Passes"), passes_row);
+    if (QWidget *name = form->labelForField(passes_row)) name->setToolTip(passes_tip);
 
     layout->addWidget(network);
 
@@ -491,6 +505,7 @@ Settings MainWindow::current_settings() const {
     settings.style = style_->currentIndex();
     settings.auto_mask = auto_mask_->isChecked();
     settings.passes = passes_->value();
+    settings.keep_local_tone = keep_tone_->isChecked();
     return settings;
 }
 

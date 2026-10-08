@@ -506,17 +506,48 @@ bool Processor::process(const Image &in, Image &out, const Settings &settings,
     // Depth and motion vectors are left out: a still image has neither, and the
     // layer accepts their absence.
     //
-    // The network blends with its own previous output, and that history starts
-    // black, so the first pass has to say it is a first frame. Repeating after
-    // that is what lets the blend settle on a picture that is not moving.
+    // Every pass starts from a blank history: after the first, the picture it
+    // works on is the result of the one before, a new picture to the network
+    // rather than the next frame of the same scene.
     frame.reset_accumulation = true;
     const int passes = settings.passes < 1 ? 1 : settings.passes;
     for (int pass = 0; pass < passes; ++pass) {
+        if (pass > 0) {
+            // The tone is read when the feature is made. Without it the later
+            // passes get a feature of their own, made once for all of them.
+            if (pass == 1 && !settings.keep_local_tone && settings.local_tone != 0.0f) {
+                dlss_cuda::FeatureDesc later = feature;
+                later.neural.local_tone_strength = 0.0f;
+                if (!dlss_cuda::create_feature(later)) {
+                    error = dlss_cuda::last_error();
+                    return false;
+                }
+            }
+            // The result becomes the picture the next pass works on.
+            D3D12_RESOURCE_BARRIER to_copy[2] = {};
+            for (int i = 0; i < 2; ++i) {
+                to_copy[i].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                to_copy[i].Transition.pResource = i == 0 ? s->result : s->colour;
+                to_copy[i].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+                to_copy[i].Transition.StateAfter =
+                    i == 0 ? D3D12_RESOURCE_STATE_COPY_SOURCE : D3D12_RESOURCE_STATE_COPY_DEST;
+                to_copy[i].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            }
+            s->allocator->Reset();
+            s->cmd->Reset(s->allocator, nullptr);
+            s->cmd->ResourceBarrier(2, to_copy);
+            s->cmd->CopyResource(s->colour, s->result);
+            for (auto &b : to_copy) std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
+            s->cmd->ResourceBarrier(2, to_copy);
+            s->cmd->Close();
+            ID3D12CommandList *copy_lists[] = {s->cmd};
+            s->queue->ExecuteCommandLists(1, copy_lists);
+            s->wait();
+        }
         if (!dlss_cuda::evaluate(frame)) {
             error = dlss_cuda::last_error();
             return false;
         }
-        frame.reset_accumulation = false;
     }
 
     D3D12_RESOURCE_BARRIER back{};
