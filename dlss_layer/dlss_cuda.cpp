@@ -1509,6 +1509,7 @@ void set_frame_params_nr(const FeatureDesc &create, const NeuralRenderingDesc &n
     g.params->Set("DLSSNR.BackbufferSubrectHeight", create.output_height);
 
     g.params->Set(nr_param::Style, nr.style);
+    g.params->Set("DLSSNR.Hint.Render.Preset", (unsigned)(nr.preset < 0 ? 0 : nr.preset));
     g.params->Set(nr_param::Intensity, nr.intensity);
     g.params->Set(nr_param::LocalToneStrength, nr.local_tone_strength);
     g.params->Set(nr_param::LocalStructureStrength, nr.local_structure_strength);
@@ -1535,7 +1536,8 @@ void set_frame_params_nr(const FeatureDesc &create, const NeuralRenderingDesc &n
 }
 
 static bool same_neural_controls(const NeuralRenderingDesc &a, const NeuralRenderingDesc &b) {
-    return a.style == b.style && a.intensity == b.intensity && a.local_tone_strength == b.local_tone_strength &&
+    return a.style == b.style && a.preset == b.preset && a.intensity == b.intensity &&
+           a.local_tone_strength == b.local_tone_strength &&
            a.local_structure_strength == b.local_structure_strength &&
            a.skin_structure_strength == b.skin_structure_strength && a.ui_correction == b.ui_correction &&
            a.use_auto_mask == b.use_auto_mask && a.depth_convention == b.depth_convention &&

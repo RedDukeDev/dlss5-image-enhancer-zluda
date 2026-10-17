@@ -306,6 +306,17 @@ QWidget *MainWindow::build_controls() {
     form->addRow(tr("NR Style"), style_);
     if (QWidget *name = form->labelForField(style_)) name->setToolTip(style_tip);
 
+    preset_ = new QComboBox(panel);
+    preset_->addItems({tr("Library default"), tr("Preset 1 (larger)"), tr("Preset 2 (smaller, faster)")});
+    const QString preset_tip =
+        tr("Which network the library runs.\n\n"
+           "Library default is the one NVIDIA's library picks. Preset 1 is the larger "
+           "network the earlier versions of the library carried: slower. Preset 2 is "
+           "the smaller one. Versions of the library with a single network ignore this.");
+    preset_->setToolTip(preset_tip);
+    form->addRow(tr("NR Network"), preset_);
+    if (QWidget *name = form->labelForField(preset_)) name->setToolTip(preset_tip);
+
     auto_mask_ = new QCheckBox(tr("Automatic mask"), panel);
     auto_mask_->setChecked(true);
     auto_mask_->setToolTip(
@@ -503,6 +514,7 @@ Settings MainWindow::current_settings() const {
     // -1 is the network's "automatic": it follows the structure strength.
     settings.skin_structure = skin_auto_->isChecked() ? -1.0f : (float)skin_structure_->value();
     settings.style = style_->currentIndex();
+    settings.preset = preset_->currentIndex();
     settings.auto_mask = auto_mask_->isChecked();
     settings.passes = passes_->value();
     settings.keep_local_tone = keep_tone_->isChecked();

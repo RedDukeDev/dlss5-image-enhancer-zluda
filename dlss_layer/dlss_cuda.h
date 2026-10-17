@@ -75,11 +75,17 @@ enum class Feature {
 // The neural rendering controls. All of them are neutral at zero except
 // intensity; the snippet clamps out of range values itself.
 //
-// The snippet has no global tone control and no choice of preset: it never
-// reads DLSSNR.GlobalToneStrength, and the same network answers whatever
-// preset is asked for. Neither is offered.
+// The snippet has no global tone control: it never reads
+// DLSSNR.GlobalToneStrength, so none is offered. Version 310.9.16 carries two
+// networks and chooses between them by preset (below); the versions before
+// carried one, which answered whatever preset was asked for.
 struct NeuralRenderingDesc {
     int32_t style = 0;
+    // Which network: 0 leaves it to the library, 1 and up are the presets it
+    // carries in its own order (310.9.16: 1 the larger network of the versions
+    // before, 2 the smaller one it chooses by default). A number it does not
+    // carry falls back on its choice. Read when the feature is created.
+    int32_t preset = 0;
     float intensity = 1.0f;
     // The strengths the network takes. Local tone and local structure at one
     // give a clear, sane improvement.

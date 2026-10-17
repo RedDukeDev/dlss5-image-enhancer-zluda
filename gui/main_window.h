@@ -117,6 +117,7 @@ private:
     QDoubleSpinBox *skin_structure_ = nullptr;
     QCheckBox *skin_auto_ = nullptr;
     QComboBox *style_ = nullptr;
+    QComboBox *preset_ = nullptr;
     QCheckBox *auto_mask_ = nullptr;
     QSpinBox *passes_ = nullptr;
     QCheckBox *keep_tone_ = nullptr;

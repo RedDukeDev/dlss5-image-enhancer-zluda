@@ -454,6 +454,7 @@ bool Processor::process(const Image &in, Image &out, const Settings &settings,
     feature.neural.local_structure_strength = settings.local_structure;
     feature.neural.skin_structure_strength = settings.skin_structure;
     feature.neural.style = settings.style;
+    feature.neural.preset = settings.preset;
     feature.neural.use_auto_mask = settings.auto_mask;
     if (!dlss_cuda::create_feature(feature)) {
         error = dlss_cuda::last_error();

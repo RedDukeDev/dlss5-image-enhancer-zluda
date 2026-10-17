@@ -27,6 +27,7 @@ struct Settings {
     float local_structure = 1.0f;
     float skin_structure = -1.0f;
     int style = 0;   // 0 default, 1 natural, 2 cinematic
+    int preset = 0;  // 0 the library's own choice of network, 1 and up the ones it carries
     bool auto_mask = true;
     // How many times the network runs. Each pass works on the result of the one
     // before it, as if that were a new picture, so the effect builds up.
