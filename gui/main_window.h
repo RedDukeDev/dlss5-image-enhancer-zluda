@@ -18,7 +18,6 @@ class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
-class QLineEdit;
 class QPushButton;
 class QSpinBox;
 class QSlider;
@@ -74,11 +73,7 @@ private slots:
     void on_started(bool ok, const QString &message);
     void on_finished(bool ok, const Image &output, double milliseconds, const QString &message);
     void show_original(bool original);
-    // Toggled by the AMD/NVIDIA button. On NVIDIA the driver, the NGX runtime
-    // and NVAPI are never picked by hand -- they are found the normal way, by
-    // the network and by dlss_cuda.cpp's own fallback to the bare DLL name --
-    // so their rows are hidden and their fields forced empty; on AMD they
-    // behave exactly as they always have.
+    // Toggled by the AMD/NVIDIA button: picks which CUDA driver and NVAPI are used.
     void set_nvidia_mode(bool nvidia);
 
 private:
@@ -88,8 +83,8 @@ private:
     void display(const Image &image);
     void rescale();
     void set_busy(bool busy);
-    void remember_paths() const;
-    void restore_paths();
+    void remember_mode() const;
+    void restore_mode();
     Settings current_settings() const;
 
     QThread worker_thread_;
@@ -104,12 +99,6 @@ private:
 
     QPushButton *mode_button_ = nullptr;
     bool nvidia_mode_ = false;
-
-    QLineEdit *snippet_path_ = nullptr;
-    // The driver/nvapi rows, hidden as a whole in NVIDIA mode -- the NGX
-    // runtime row is never hidden, see set_nvidia_mode. Each is the field
-    // widget passed to QFormLayout::addRow, which is also the key
-    // QFormLayout::labelForField needs to reach the row's other half.
 
     QDoubleSpinBox *intensity_ = nullptr;
     QDoubleSpinBox *local_tone_ = nullptr;

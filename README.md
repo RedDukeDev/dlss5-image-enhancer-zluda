@@ -9,15 +9,15 @@ I also forked Zluda's version of LLVM and made a small change which should, in t
 
 ## How to use
 Download the zip from the [Release section](https://github.com/RedDukeDev/dlss5-image-enhancer-zluda/releases), and run dlss5-image-enhancer.exe
-On the top-right side, you have to select the required DLL.
+Nothing has to be selected: the release package already contains everything the program needs, including the "Network" DLL, nvngx_dlssnr.dll, the library that actually contains the DLSS5 code. It sits beside dlss5-image-enhancer.exe and the program looks for it there.
 
-The "Network" DLL is the nvngx_dlssnr.dll which is the library that actually contains the DLSS5 code. This one is the official Nvidia library, and it's not included in this project. you have to get it from a game which uses it (for example NBA 2K27), or get it from one of the countless community projects that are using it, like the RenoDX plugin for Reshade.
+The library is the official Nvidia one (version 310.9.16, the one the shipped cache was built from) and it is not part of this repository, only of the release package. If you build the project from source, copy your own nvngx_dlssnr.dll into `dist` beside the executable. You can take it from a game which uses it (for example NBA 2K27), or from one of the countless community projects that are using it, like the RenoDX plugin for Reshade.
 NOTE: many projects ship a custom version of the DLSS5 library modified to run on the RTX 4000, 3000 and 2000 series. That library cannot be used with Zluda, we need the original one. Should instead be fine for Nvidia users.
 
 AMD users will also have to install the [official HIP SDK for Windows](https://www.amd.com/en/developer/resources/rocm-hub/hip-sdk.html)
 
 ## For Nvidia users
-I also made a "nvidia mode", which tries to run the dlss using the official drivers. you still need to provide the nvngx_dlssnr.dll library.
+I also made a "nvidia mode", which tries to run the dlss using the official drivers. It uses the same nvngx_dlssnr.dll library, the one that comes in the release package.
 
 # Building from source
 To build the application, you can use the "build.bat" script. It requires the QT toolkit for MSVC 2022 to be installed in `C:\Qt\6.11.2\msvc2022_64`

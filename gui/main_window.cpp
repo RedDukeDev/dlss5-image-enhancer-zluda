@@ -19,7 +19,6 @@
 #include <QHBoxLayout>
 #include <QImage>
 #include <QLabel>
-#include <QLineEdit>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QPixmap>
@@ -69,26 +68,6 @@ QImage to_qimage(const Image &image) {
         }
     }
     return out;
-}
-
-QLineEdit *path_row(QFormLayout *form, const QString &label, const QString &filter,
-                    QWidget *parent, QWidget **row_out = nullptr) {
-    auto *edit = new QLineEdit(parent);
-    auto *browse = new QPushButton(QObject::tr("Browse..."), parent);
-    auto *row = new QWidget(parent);
-    auto *layout = new QHBoxLayout(row);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->addWidget(edit, 1);
-    layout->addWidget(browse);
-    QObject::connect(browse, &QPushButton::clicked, parent, [edit, filter, parent] {
-        const QString chosen =
-            QFileDialog::getOpenFileName(parent, QObject::tr("Select a library"), edit->text(),
-                                         filter);
-        if (!chosen.isEmpty()) edit->setText(chosen);
-    });
-    form->addRow(label, row);
-    if (row_out) *row_out = row;
-    return edit;
 }
 
 QDoubleSpinBox *strength_row(QFormLayout *form, const QString &label, double value,
@@ -223,7 +202,7 @@ MainWindow::MainWindow() {
     connect(worker_, &Worker::finished, this, &MainWindow::on_finished);
     worker_thread_.start();
 
-    restore_paths();
+    restore_mode();
 
     g_window = this;
     dlss_cuda::set_log_sink(&log_to_window);
@@ -232,7 +211,7 @@ MainWindow::MainWindow() {
 MainWindow::~MainWindow() {
     dlss_cuda::set_log_sink(nullptr);
     g_window = nullptr;
-    remember_paths();
+    remember_mode();
     worker_thread_.quit();
     // A translation or an evaluation in progress on the worker thread can run
     // for minutes with no way to interrupt it partway through -- precompile's
@@ -390,13 +369,8 @@ QWidget *MainWindow::build_controls() {
     return panel;
 }
 
-namespace {
-// Defined further down, next to the search it does.
-void fill_in_defaults(QLineEdit *snippet);
-} // namespace
-
 QWidget *MainWindow::build_paths() {
-    auto *box = new QGroupBox(tr("Libraries"));
+    auto *box = new QGroupBox(tr("Mode"));
     auto *layout = new QVBoxLayout(box);
 
     // A two-state button rather than a combo box or a pair of radio buttons:
@@ -406,107 +380,33 @@ QWidget *MainWindow::build_paths() {
     mode_button_->setCheckable(true);
     layout->addWidget(mode_button_);
 
-    auto *form_widget = new QWidget(box);
-    auto *form = new QFormLayout(form_widget);
-    form->setContentsMargins(0, 0, 0, 0);
-    layout->addWidget(form_widget);
-
-    const QString dll = tr("Libraries (*.dll)");
-    snippet_path_ = path_row(form, tr("Network (nvngx_dlssnr.dll)"), dll, this);
-
     connect(mode_button_, &QPushButton::toggled, this, &MainWindow::set_nvidia_mode);
     return box;
 }
 
-// AMD keeps exactly the behaviour this program has always had: all four
-// fields, filled in or picked by hand, held to the checks in run() and in
-// Processor::start(). NVIDIA needs only the network and the NGX runtime --
-// the driver and NVAPI are found the ordinary way once their fields are empty
-// (dlss_cuda.cpp's own fallback to the bare DLL name, and NVAPI left alone
-// entirely), so those two rows are hidden and their fields cleared rather
-// than left to be filled in and second-guessed.
-//
-// The NGX runtime is not part of that: it is never the driver's, on either
-// GPU. The snippet only accepts calls that appear to come from a module named
-// nvngx.dll, and it checks that by name, not by what the module can do -- so
-// the loader has to be *our* nvngx.dll (ngx_runtime/ngx_runtime.cpp), the one
-// that exports the calls dlss_cuda.cpp actually makes. A real NVIDIA
-// nvngx.dll answers to that name but does not export them, and loading it
-// fails with "could not load the NGX runtime nvngx.dll" the first time
-// something is missing, or subtler errors afterward if it happens to export
-// something with the same name by coincidence. So its row stays visible and
-// its field filled in the same way in both modes.
+// The mode only decides which CUDA driver and which NVAPI Processor::start
+// takes; there is nothing to fill in. The NGX runtime is ours in both modes:
+// the snippet only accepts calls that appear to come from a module named
+// nvngx.dll, by name and not by what the module can do, and a real NVIDIA
+// nvngx.dll answers to that name without exporting the calls this makes.
 void MainWindow::set_nvidia_mode(bool nvidia) {
     nvidia_mode_ = nvidia;
     mode_button_->setText(nvidia ? tr("Mode: NVIDIA") : tr("Mode: AMD (ZLUDA)"));
-    fill_in_defaults(snippet_path_);
 }
 
-namespace {
-
-// Fills the four paths in when nothing has been chosen yet.
-//
-// Two arrangements are worth guessing. Beside the executable is where this
-// project's own files sit, and they win: the NGX runtime in particular has to be
-// ours, since the network refuses to be called from a module by any other name
-// and NVIDIA's own nvngx.dll carries none of the exports this needs.
-//
-// The rest can come from an installed NVIDIA driver: its CUDA driver is in the
-// system directory, and the network itself ships in the driver store, where the
-// folder name changes with every release and so has to be searched for.
-// Finds the network so the user usually does not have to. Beside the
-// executable first, then NVIDIA's driver store, which keeps each release in its
-// own folder -- so the newest match is the one to take.
-//
-// Nothing else is guessed here any more: the CUDA driver, NVAPI and the NGX
-// runtime are resolved by Processor::start from the mode, and there is no field
-// for them to be written into.
-void fill_in_defaults(QLineEdit *snippet) {
-    if (!snippet->text().isEmpty()) return;
-    const QDir beside(QCoreApplication::applicationDirPath());
-    QString found = beside.filePath(QStringLiteral("nvngx_dlssnr.dll"));
-    if (!QFileInfo::exists(found)) {
-        found.clear();
-        QDir store("C:/Windows/System32/DriverStore/FileRepository");
-        const QStringList folders = store.entryList({"nv_disp*"}, QDir::Dirs, QDir::Time);
-        for (const QString &folder : folders) {
-            const QString candidate = store.filePath(folder) + "/nvngx_dlssnr.dll";
-            if (QFileInfo::exists(candidate)) {
-                found = candidate;
-                break;
-            }
-        }
-    }
-    snippet->setText(found);
-}
-
-} // namespace
-
-void MainWindow::restore_paths() {
+void MainWindow::restore_mode() {
     QSettings settings("dlss5-image-enhancer", "paths");
-    snippet_path_->setText(settings.value("snippet").toString());
-
-    // Applied after the text above, not before: on NVIDIA this clears what was
-    // just restored, which is correct there, and on AMD fill_in_defaults only
-    // ever touches a field that is still empty, so what was just restored
-    // survives untouched.
-    //
     // Called directly rather than through the button's toggled signal: a
     // checkable QPushButton does not emit it when setChecked is given the
-    // state it already has, and the default unchecked state is exactly the
-    // saved value on a first run, where fill_in_defaults still has to run.
+    // state it already has.
     const bool nvidia = settings.value("nvidia_mode", false).toBool();
     mode_button_->setChecked(nvidia);
     set_nvidia_mode(nvidia);
 }
 
-void MainWindow::remember_paths() const {
+void MainWindow::remember_mode() const {
     QSettings settings("dlss5-image-enhancer", "paths");
     settings.setValue("nvidia_mode", nvidia_mode_);
-    // Only on AMD: on NVIDIA these three are cleared by design, and saving
-    // that over a working AMD configuration would lose it the moment the
-    // program happens to close in the other mode.
-    settings.setValue("snippet", snippet_path_->text());
 }
 
 Settings MainWindow::current_settings() const {
@@ -586,34 +486,15 @@ void MainWindow::set_busy(bool busy) {
 
 void MainWindow::run() {
     if (input_.empty()) return;
-    // The network is the only file the user has to find. Everything else --
-    // the CUDA driver, NVAPI, the NGX runtime -- either ships with this program
-    // under zluda\ or comes with the NVIDIA driver, and Processor::start picks
-    // whichever the mode calls for.
-    if (snippet_path_->text().isEmpty()) {
+    // The network ships beside this program. In NVIDIA mode it is never opened by
+    // path at all: only its folder is handed to NGX as a search path, and NGX
+    // then looks there for "nvngx_dlssnr.dll" itself.
+    const QString network =
+        QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("nvngx_dlssnr.dll"));
+    if (!QFileInfo::exists(network)) {
         QMessageBox::warning(this, tr("Enhance"),
-                             tr("The network (nvngx_dlssnr.dll) has to be pointed at before "
-                                "anything can run."));
-        return;
-    }
-    // The file has to be that one by name, not merely a DLSS snippet. In NVIDIA
-    // mode it is never opened by path at all: only its folder is handed to NGX
-    // as a search path, and NGX then looks there for "nvngx_dlssnr.dll" itself.
-    // Point this at the upscaler (nvngx_dlss.dll) and NGX finds no neural
-    // rendering snippet in that folder, falls back to the driver's own copy,
-    // which does not carry this feature -- and the only thing the user sees is
-    // an opaque 0xBAD0000B from CreateFeature. A renamed copy fails the same
-    // way for the same reason, so the name really is the requirement.
-    const QFileInfo chosen(snippet_path_->text());
-    if (chosen.fileName().compare(QStringLiteral("nvngx_dlssnr.dll"), Qt::CaseInsensitive) != 0) {
-        QMessageBox::warning(
-            this, tr("Enhance"),
-            tr("The network has to be the file named nvngx_dlssnr.dll, but this points at "
-               "%1.\n\nThat is a different DLSS snippet: nvngx_dlss.dll is the upscaler, and it "
-               "carries no neural rendering network. In NVIDIA mode the file is not even opened "
-               "by name -- its folder is handed to NGX, which looks there for nvngx_dlssnr.dll "
-               "itself, finds nothing, and fails with an error that explains none of this.")
-                .arg(chosen.fileName()));
+                             tr("The network (nvngx_dlssnr.dll) was not found beside the program:\n%1")
+                                 .arg(QDir::toNativeSeparators(network)));
         return;
     }
     set_busy(true);
@@ -623,7 +504,7 @@ void MainWindow::run() {
                         "network and can take a long time."));
 
     Paths paths;
-    paths.snippet = to_wide(snippet_path_->text());
+    paths.snippet = to_wide(network);
     paths.nvidia = nvidia_mode_;
 
     QMetaObject::invokeMethod(worker_, "start", Qt::QueuedConnection, Q_ARG(Paths, paths));
