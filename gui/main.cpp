@@ -38,7 +38,29 @@ void kill_children_when_this_process_ends() {
     }
 }
 
+// Ends this process now, without ExitProcess.
+//
+// A normal exit, and std::_Exit as well, goes through ExitProcess, which detaches
+// every DLL still loaded -- here the network, ZLUDA and the HIP runtime, with a
+// GPU context behind them. That teardown can hang: the process was left running
+// with no window, one thread spinning inside ntdll, for minutes. Until a process
+// has really ended the job object above has not closed either, so its children
+// went on running too. TerminateProcess skips all of it and the job takes the
+// children with it.
+//
+// Nothing is lost by it: the settings are saved before this is reached, and the
+// translation cache is written by the call that translates, in a database whose
+// committed rows survive the process ending.
+[[noreturn]] void end_process(int code) {
+    fflush(nullptr);
+    TerminateProcess(GetCurrentProcess(), (UINT)code);
+    for (;;) Sleep(1000); // not reached
+}
+
 } // namespace
+
+// Public so that the window can end the process the same way when it cannot wait.
+void end_this_process(int code) { end_process(code); }
 
 int main(int argc, char **argv) {
     kill_children_when_this_process_ends();
@@ -54,8 +76,10 @@ int main(int argc, char **argv) {
 
     // One module, then exit: what the parallel translation spawns copies of
     // this program to do.
+    // (Ended at once: its parent waits for it, and a hang while the driver is
+    // torn down would hold the parent's translation for good.)
     if (arguments.size() == 4 && arguments[1] == QLatin1String("--compile-one"))
-        return enhancer::compile_one(arguments[2].toStdWString(), arguments[3].toStdWString());
+        end_process(enhancer::compile_one(arguments[2].toStdWString(), arguments[3].toStdWString()));
 
     // A way to exercise the whole path without a window, so it can be checked
     // rather than clicked through.
@@ -78,7 +102,11 @@ int main(int argc, char **argv) {
         return ok ? 0 : 1;
     }
 
-    enhancer::MainWindow window;
-    window.show();
-    return QApplication::exec();
+    int result = 0;
+    {
+        enhancer::MainWindow window;
+        window.show();
+        result = QApplication::exec();
+    } // the window's destructor runs here
+    end_process(result);
 }

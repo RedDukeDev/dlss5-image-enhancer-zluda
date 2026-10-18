@@ -31,6 +31,9 @@
 #include <QStatusBar>
 #include <QVBoxLayout>
 
+// main.cpp: the way this process ends, see there
+void end_this_process(int code);
+
 namespace enhancer {
 namespace {
 
@@ -244,7 +247,7 @@ MainWindow::~MainWindow() {
     // the moment this process actually ends -- which a hard exit forces now
     // instead of leaving to however long the translation was going to take.
     if (!worker_thread_.wait(2000)) {
-        std::_Exit(0);
+        ::end_this_process(0);
     }
 }
 
